@@ -68,6 +68,7 @@ async function newsCycle() {
     const scored = score(classified);
     const passed = scored.filter((it) => it.score >= cfg.ALERT_THRESHOLD);
     const passCount = passed.length;
+    console.log("[NEWS] passed", { passCount });
 
     log.info("[NEWS] fetched", {
       rawCount,
