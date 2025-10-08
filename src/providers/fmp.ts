@@ -214,7 +214,7 @@ export async function isExchangeOk(symbol: string): Promise<boolean> {
 
     const allowed = new Set(["OTC"]);
 
-    const exOk = allowed.has(canon(p.exchange));
+    const exOk = allowed.has(p.exchange);
     const activeOk = (p.isActivelyTrading ?? true) === true;
     const priceOk = (p.price ?? 0) >= 1; // filter out penny stocks
 
