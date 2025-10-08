@@ -71,8 +71,8 @@ export async function fetchBenzingaPressReleases(
 ): Promise<RawItem[]> {
   const {
     maxPages = 1,
-    minMarketCap = 5_000_000,
-    maxMarketCap = 600_000_000,
+    minMarketCap = 0,
+    maxMarketCap = 30_000_000,
     includeUnknownMktCap = false,
   } = params;
 
