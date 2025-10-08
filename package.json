@@ -1,0 +1,40 @@
+{
+  "name": "penny-stocks-pr-alert",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "dist/run_realtime.js",
+  "scripts": {
+    "build": "tsup src/run_realtime.ts --format esm --dts --out-dir dist --clean",
+    "build:backtest": "tsup tests/backtest.ts --format esm --platform=node --out-dir dist --clean=false",
+    "build:all": "npm run build && npm run build:backtest",
+    "dev": "tsup src/run_realtime.ts --watch --format esm --dts --out-dir dist --clean --onSuccess=\"node dist/run_realtime.js\"",
+    "start": "node dist/run_realtime.js",
+    "bt:fmp": "node dist/backtest.js ",
+    "bt:file": "node dist/backtest.js --mode=file --file=./out/recommended.jsonl ",
+    "bt:analyze": "tsx tests/analyze_backtest.ts --file ./out/backtest_results.csv"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "better-sqlite3": "^9.6.0",
+    "cheerio": "^1.1.2",
+    "csv-parse": "^6.1.0",
+    "dotenv": "^16.4.5",
+    "luxon": "^3.7.2",
+    "openai": "^5.20.3",
+    "p-limit": "^5.0.0",
+    "playwright": "^1.55.0",
+    "rss-parser": "^3.13.0",
+    "ws": "^8.18.0",
+    "yargs": "^18.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/luxon": "^3.7.1",
+    "@types/node": "^24.3.1",
+    "@types/ws": "^8.18.1",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

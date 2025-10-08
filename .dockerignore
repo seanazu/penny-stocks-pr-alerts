@@ -1,0 +1,20 @@
+# Node
+node_modules
+npm-debug.log
+yarn-error.log
+.pnpm-store
+
+# Build
+dist
+.tsup
+*.tsbuildinfo
+
+# VCS/OS
+.git
+.gitignore
+.DS_Store
+
+# Local data
+data
+logs
+.env

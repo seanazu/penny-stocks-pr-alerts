@@ -1,0 +1,55 @@
+# --- Node / TypeScript ---
+node_modules/
+dist/
+*.tsbuildinfo
+.npmrc
+.pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+# (keep only one lockfile; if you use npm, commit package-lock.json and remove the others)
+# package-lock.json
+
+# --- Env & secrets (never commit!) ---
+.env
+.env.*
+!.env.example        # keep a non-secret sample
+
+# --- Local data & logs ---
+data/
+logs/
+*.log
+*.csv
+
+# SQLite & local DB artifacts
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# --- OS / Editor noise ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+
+# --- Coverage / test output ---
+coverage/
+.nyc_output/
+
+# --- Docker ---
+# (these are generated locally, not needed in git)
+**/.dockerignore-local
+# docker build cache dirs (if any custom)
+.tmp_docker/
+
+# --- Misc build caches ---
+.cache/
+.tmp/

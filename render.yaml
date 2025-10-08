@@ -1,0 +1,58 @@
+services:
+  - name: news-surge-worker
+    type: worker
+    runtime: docker
+    plan: starter
+    region: oregon
+    autoDeploy: true
+
+    # persistent SQLite storage
+    disk:
+      name: db
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      # --- News / Data Providers ---
+      - key: MARKETAUX_API_KEY
+        sync: false
+      - key: FMP_API_KEY
+        sync: false
+
+      # choose one realtime source; you can set both
+      - key: POLYGON_API_KEY
+        sync: false
+
+      # Discord notifications
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: DISCORD_CHANNEL_ID
+        sync: false
+
+      # --- Storage ---
+      - key: DB_PATH
+        value: /data/events.db
+
+      # --- Polling cadence ---
+      - key: POLL_NEWS_SECONDS
+        sync: false
+      - key: NEWS_LOOKBACK_MINUTES
+        sync: false
+
+      # --- Scoring/Confirmation thresholds ---
+      - key: ALERT_THRESHOLD
+        sync: false
+      - key: VOL_Z_MIN
+        sync: false
+      - key: RET_1M_MIN
+        sync: false
+      - key: VWAP_DEV_MIN
+        sync: false
+      - key: VOL_WINDOW_SIZE
+        sync: false
+
+      # Optional (uncomment if your code reads them)
+      # - key: RISK_PCT
+      #   value: "0.01"
+      # - key: STARTING_EQUITY
+      #   value: "100000"
