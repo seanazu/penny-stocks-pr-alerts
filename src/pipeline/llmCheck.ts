@@ -34,7 +34,7 @@ const FMP_BASE = "https://financialmodelingprep.com";
 
 const MODEL = "gpt-5" as const;
 const REASONING_EFFORT: "low" | "medium" | "high" = "medium";
-const MAX_OUT_TOKENS = 4500;
+const MAX_OUT_TOKENS = 80000;
 
 /* ---------- Display helpers ---------- */
 function strengthToBucket(s?: number): { name: string; emoji: string } {
@@ -234,7 +234,7 @@ async function discoverCatalyst(ticker: string): Promise<{
     tools: [{ type: "web_search" }],
     tool_choice: "auto",
     reasoning: { effort: REASONING_EFFORT },
-    max_output_tokens: 2000,
+    max_output_tokens: 80000,
     instructions: system_discover(ticker),
     input: [
       {
