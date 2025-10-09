@@ -59,14 +59,8 @@ async function fetchMarketCaps(
   return out;
 }
 
-/** Benzinga Press Releases (near real-time), with market-cap filtering.
- *  Returns the SAME RawItem shape as before.
- *
- *  Requires: cfg.BENZINGA_API_KEY
- *  Endpoint: GET https://api.benzinga.com/api/v2/news
- *  Filters : channels=Press Releases, displayOutput=full, updatedSince=<unix>
- */
-export async function fetchBenzingaPressReleases(
+/** FMP Press Releases (paged “latest”), with the same market-cap filtering. */
+export async function fetchFmpPressReleases(
   params: FetchBenzingaPressReleases = {}
 ): Promise<RawItem[]> {
   const {
@@ -78,72 +72,121 @@ export async function fetchBenzingaPressReleases(
 
   const out: RawItem[] = [];
 
-  if (!cfg.BENZINGA_API_KEY) {
-    log.warn("[BZ] BENZINGA_API_KEY missing — returning empty set");
+  if (!cfg.FMP_API_KEY) {
+    log.warn("[FMP] FMP_API_KEY missing — returning empty set");
     return out;
   }
 
-  // Pull up to maxPages of results (if the API supports paging).
-  for (let page = 1; page <= maxPages; page++) {
-    try {
-      const { data } = await axios.get("https://api.benzinga.com/api/v2/news", {
-        params: {
-          displayOutput: "full",
-          sort: "updated:desc",
-          page: 1,
-          pageSize: 50,
-          token: cfg.BENZINGA_API_KEY,
-        },
-      });
-
-      const items = (Array.isArray(data) ? data : []).map((d: any) => {
-        const url = d?.url || d?.amp_url || d?.source || undefined;
-        const title = d?.title || "";
-        const summary = d?.teaser + String(d?.body) || "";
-        const created = d?.created || d?.updated || null;
-        const stocks = Array.isArray(d?.stocks) ? d.stocks : [];
-        const firstSym = (stocks[0] || "").toString().trim();
-
-        const mapped: RawItem = {
-          id: `${firstSym}|${created}|${url}`,
-          url,
-          title,
-          summary,
-          source: "benzinga_pr",
-          publishedAt: created,
-          symbols: stocks.filter(Boolean).map((s: { name: any }) => s.name),
-        };
-        return mapped;
-      }) as RawItem[];
-
-      out.push(...items);
-
-      log.info("[BZ] fetched press releases page", {
-        page,
-        articles: items.length,
-      });
-
-      // If the provider doesn't page results, break early when we see fewer items.
-      if (!Array.isArray(data) || !data.length) break;
-    } catch (e) {
-      log.warn("[BZ] error fetching press releases", { page, error: e });
+  // Helper to normalize a single FMP PR row into RawItem
+  const mapRow = (d: any): RawItem | null => {
+    // FMP stable/legacy fields we’ve seen:
+    // symbol | tickers[], date | publishedDate, title, text | content | description, url | link
+    const symbolsArr: string[] = [];
+    if (typeof d?.symbol === "string" && d.symbol.trim())
+      symbolsArr.push(d.symbol.trim().toUpperCase());
+    if (Array.isArray(d?.tickers)) {
+      for (const t of d.tickers) {
+        if (typeof t === "string" && t.trim())
+          symbolsArr.push(t.trim().toUpperCase());
+      }
     }
+    const symbols = Array.from(new Set(symbolsArr));
+
+    const published =
+      (typeof d?.date === "string" && d.date) ||
+      (typeof d?.publishedDate === "string" && d.publishedDate) ||
+      null;
+
+    const url = d?.url || d?.link || undefined;
+    const title = d?.title || "";
+    const body = d?.text || d?.content || d?.description || "";
+
+    // Drop obviously empty
+    if (!title && !body) return null;
+
+    const firstSym = symbols[0] || "NA";
+    const id = `${firstSym}|${published ?? ""}|${url ?? ""}`;
+
+    const item: RawItem = {
+      id,
+      url,
+      title,
+      summary: body,
+      source: "fmp_pr",
+      publishedAt: published ?? null,
+      symbols,
+    };
+    return item;
+  };
+
+  const stableBase =
+    "https://financialmodelingprep.com/stable/news/press-releases-latest";
+  const legacyBase = "https://financialmodelingprep.com/api/v3/press-releases";
+
+  for (let page = 0; page < maxPages; page++) {
+    // Try STABLE first; if it fails, fall back to LEGACY for this page
+    let data: any = null;
+
+    try {
+      const { data: stableData } = await axios.get(stableBase, {
+        params: { page, limit: 25, apikey: cfg.FMP_API_KEY },
+        timeout: 8000,
+      });
+      data = stableData;
+    } catch (e) {
+      log.warn("[FMP] stable press-releases failed, falling back to legacy", {
+        page,
+        error: (e as any)?.message,
+      });
+      try {
+        const { data: legacyData } = await axios.get(legacyBase, {
+          params: { page, apikey: cfg.FMP_API_KEY },
+          timeout: 8000,
+        });
+        data = legacyData;
+      } catch (ee) {
+        log.warn("[FMP] legacy press-releases failed", {
+          page,
+          error: (ee as any)?.message,
+        });
+        continue; // try next page
+      }
+    }
+
+    const rows: any[] = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.items)
+      ? data.items
+      : [];
+    if (!rows.length) {
+      // Likely end of feed
+      if (page > 0) break;
+      continue;
+    }
+
+    const mapped = rows.map(mapRow).filter((x): x is RawItem => !!x);
+
+    out.push(...mapped);
+
+    log.info("[FMP] fetched press releases page", {
+      page,
+      articles: mapped.length,
+    });
   }
 
-  log.info("[BZ] total raw PR items", { items: out.length });
+  log.info("[FMP] total raw PR items", { items: out.length });
   if (!out.length) return out;
 
-  // 2) Resolve market caps for all unique symbols, then filter (unchanged logic)
+  // --- Resolve caps, then filter (same logic as Benzinga) ---
   const uniqueSymbols = Array.from(
     new Set(out.flatMap((it) => (Array.isArray(it.symbols) ? it.symbols : [])))
   ).filter(Boolean);
 
   const capMap = await fetchMarketCaps(uniqueSymbols);
 
-  // Helper: check if an item passes the cap filter
   const passesCapFilter = (item: RawItem): boolean => {
     const sym = item.symbols?.[0];
-    if (!sym) return includeUnknownMktCap; // no symbol present
+    if (!sym) return includeUnknownMktCap;
 
     const cap = capMap.get(sym);
     if (!Number.isFinite(cap)) return includeUnknownMktCap;
@@ -156,50 +199,50 @@ export async function fetchBenzingaPressReleases(
   };
 
   const filtered = out.filter(passesCapFilter);
+
   return filtered;
 }
 
 const APIKEY = cfg.FMP_API_KEY; // <-- your FMP key (unchanged for functions below)
 
-/**
- * Returns true IFF:
- * 1) The symbol is listed on a major US exchange (NASDAQ/NYSE family/Cboe) AND price >= $1 AND actively trading
- * 2) The EXACT 5m bar at `publishedAt` (interpreted using `inputZone`) is at least `threshold` ×
- *    the avg-per-5m of the prior trading day’s midday 4h bar.
- *
- * @param symbol e.g. "TSLA"
- * @param publishedAt e.g. "2025-09-09 16:03:00" (no tz)
- * @param options.threshold default 3
- * @param options.inputZone "utc" | "America/New_York" (how to interpret `publishedAt` if it has no tz; default "utc")
- * @param options.allowZeroFallback if the exact 5m has vol=0, step back a few bars; default true
- */
-// Map FMP long names to canonical short forms
-const canon = (raw = "") => {
+// Map FMP / vendor long names & odd variants to canonical short forms
+const canonExchange = (raw = ""): string => {
   const u = raw.toUpperCase().trim();
-  const map: Record<string, string> = {
-    NASDAQ: "NASDAQ",
-    "NASDAQ GLOBAL SELECT": "NASDAQGS",
-    "NASDAQ GLOBAL MARKET": "NASDAQGM",
-    "NASDAQ CAPITAL MARKET": "NASDAQCM",
-    "NEW YORK STOCK EXCHANGE": "NYSE",
-    NYSE: "NYSE",
-    "NEW YORK STOCK EXCHANGE ARCA": "NYSE ARCA",
-    "NYSE ARCA": "NYSE ARCA",
-    "NEW YORK STOCK EXCHANGE AMERICAN": "NYSE AMERICAN",
-    "NYSE AMERICAN": "NYSE AMERICAN",
-    AMEX: "AMEX",
-    BATS: "BATS",
-    "CBOE BZX": "CBOE BZX",
-    "CBOE BYX": "CBOE BYX",
-    "CBOE EDGA": "CBOE EDGA",
-    "CBOE EDGX": "CBOE EDGX",
-  };
-  if (map[u]) return map[u];
+
+  // --- OTC & grey/expert/pink variants → "OTC"
+  const otcLike =
+    u === "OTC" ||
+    u === "OTCM" ||
+    u.includes("OTC ") ||
+    u.includes(" OTC") ||
+    u.includes("OTCBB") ||
+    u.includes("OTC MARKETS") ||
+    u.includes("PINK") || // PINK OPEN MARKET / PINK CURRENT / PINK LIMITED / PINK NO INFORMATION
+    u.includes("GREY") || // GREY MARKET / GREY SHEET
+    u.includes("EXPERT"); // EXPERT MARKET
+
+  if (otcLike) return "OTC";
+
+  // --- NASDAQ tiers
+  if (u === "NASDAQ") return "NASDAQ";
   if (u.includes("GLOBAL SELECT")) return "NASDAQGS";
   if (u.includes("GLOBAL MARKET")) return "NASDAQGM";
   if (u.includes("CAPITAL MARKET")) return "NASDAQCM";
+
+  // --- NYSE families
+  if (u === "NYSE" || u.includes("NEW YORK STOCK EXCHANGE")) return "NYSE";
   if (u.includes("ARCA")) return "NYSE ARCA";
   if (u.includes("AMERICAN")) return "NYSE AMERICAN";
+  if (u === "AMEX") return "AMEX";
+
+  // --- Cboe / BATS
+  if (u === "BATS") return "BATS";
+  if (u.includes("CBOE BZX")) return "CBOE BZX";
+  if (u.includes("CBOE BYX")) return "CBOE BYX";
+  if (u.includes("CBOE EDGA")) return "CBOE EDGA";
+  if (u.includes("CBOE EDGX")) return "CBOE EDGX";
+
+  // Fallback: return as-is for logging/visibility
   return raw;
 };
 
@@ -208,18 +251,43 @@ export async function isExchangeOk(symbol: string): Promise<boolean> {
     const url = `https://financialmodelingprep.com/api/v3/profile/${encodeURIComponent(
       symbol
     )}?apikey=${APIKEY}`;
-    const r = await axios.get(url);
+    const r = await axios.get(url, { timeout: 8000 });
     const p = Array.isArray(r.data) && r.data[0] ? r.data[0] : null;
     if (!p) return false;
 
-    const allowed = new Set(["OTC"]);
+    // FMP fields seen in the wild:
+    //   exchangeShortName: "OTC" | "NASDAQ" | "NYSE" | ...
+    //   exchange: "OTC Markets" | "New York Stock Exchange" | "NASDAQ Global Select" | ...
+    const exShort = String(p.exchangeShortName ?? "").trim();
+    const exLong = String(p.exchange ?? "").trim();
 
-    const exOk = allowed.has(p.exchange);
+    const exCanon =
+      canonExchange(exShort) || canonExchange(exLong) || exShort || exLong;
+
+    // ✅ PASS if it's any OTC flavor (OTC / Pink / Grey / Expert Market variants all normalize to "OTC")
+    const isOtc = exCanon === "OTC";
+
+    // Treat missing flag as active; only fail if explicitly false
     const activeOk = (p.isActivelyTrading ?? true) === true;
-    const priceOk = (p.price ?? 0) >= 1; // filter out penny stocks
 
-    return exOk && activeOk && priceOk;
-  } catch {
+    // For penny stocks we do NOT gate by price here (you asked to ensure OTC passes in all forms)
+    const result = isOtc && activeOk;
+
+    log.info("[FMP] exchange check", {
+      symbol,
+      exchangeShortName: p.exchangeShortName,
+      exchange: p.exchange,
+      canonical: exCanon,
+      isActivelyTrading: p.isActivelyTrading,
+      pass: result,
+    });
+
+    return result;
+  } catch (e) {
+    log.warn("[FMP] exchange check error", {
+      symbol,
+      error: (e as any)?.message,
+    });
     return false;
   }
 }
