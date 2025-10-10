@@ -22,7 +22,7 @@ interface FetchBenzingaPressReleases {
 }
 
 /** --- Small helper: fetch market caps for a set of symbols (batched) --- */
-async function fetchMarketCaps(
+export async function fetchMarketCaps(
   symbols: string[]
 ): Promise<Map<string, number>> {
   const out = new Map<string, number>();
@@ -272,15 +272,6 @@ export async function isExchangeOk(symbol: string): Promise<boolean> {
 
     // For penny stocks we do NOT gate by price here (you asked to ensure OTC passes in all forms)
     const result = isOtc && activeOk;
-
-    log.info("[FMP] exchange check", {
-      symbol,
-      exchangeShortName: p.exchangeShortName,
-      exchange: p.exchange,
-      canonical: exCanon,
-      isActivelyTrading: p.isActivelyTrading,
-      pass: result,
-    });
 
     return result;
   } catch (e) {

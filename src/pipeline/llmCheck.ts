@@ -3,6 +3,7 @@ import { cfg } from "../config.js";
 import OpenAI from "openai";
 import type { ClassifiedItem } from "../types.js";
 import { log } from "../logger.js";
+import { fetchMarketCaps } from "../providers/fmp.js";
 
 /* ---------- Public types ---------- */
 export type MoveBucket =
@@ -81,24 +82,6 @@ function formatDiscordDetail(
 }
 
 /* ---------- Data helpers ---------- */
-async function fetchCapPolygon(
-  ticker: string,
-  apiKey: string
-): Promise<{ marketCapUsd?: number }> {
-  const out: { marketCapUsd?: number } = {};
-  try {
-    const ref = await fetch(
-      `${POLY_BASE}/v3/reference/tickers/${encodeURIComponent(
-        ticker
-      )}?apiKey=${apiKey}`
-    );
-    if (ref.ok) {
-      const jr = await ref.json();
-      out.marketCapUsd = jr?.results?.market_cap ?? undefined;
-    }
-  } catch {}
-  return out;
-}
 
 async function fetchLastPriceFMP(
   ticker: string,
@@ -223,10 +206,10 @@ async function discoverCatalyst(ticker: string): Promise<{
 } | null> {
   const apiKey = process.env.OPENAI_API_KEY || cfg.OPENAI_API_KEY;
   if (!apiKey) return null;
-
   const client = new OpenAI({
     apiKey,
     baseURL: process.env.OPENAI_BASE_URL || undefined,
+    maxRetries: 3,
   });
 
   const resp = await client.responses.create({
@@ -246,6 +229,7 @@ async function discoverCatalyst(ticker: string): Promise<{
     ],
     metadata: { purpose: "catalyst_discovery", ticker },
   } as any);
+  log.info("[LLM] discover catalyst response", resp);
 
   const text = extractOutputText(resp);
   let candidates: any[] | undefined;
@@ -258,7 +242,9 @@ async function discoverCatalyst(ticker: string): Promise<{
     ) {
       candidates = parsed.candidates;
     }
-  } catch {}
+  } catch (error) {
+    log.warn("[LLM] discovery parse error", { ticker, text, error });
+  }
 
   if (!candidates?.length) return null;
 
@@ -332,11 +318,14 @@ async function estimateMove(
       ticker: payload?.ticker,
     },
   } as any);
+  log.info("[LLM] estimate move response", resp);
 
   const text = extractOutputText(resp);
   try {
     return sanitizeEstimation(JSON.parse(text));
-  } catch {
+  } catch (e) {
+    log.warn("[LLM] estimation parse error", e);
+
     const m = text?.match(/\{[\s\S]*\}$/m);
     if (m) {
       try {
@@ -372,8 +361,8 @@ export async function runLlmCheck(item: ClassifiedItem): Promise<{
     if (px != null) basics.price = px;
   }
   if (!basics.marketCapUsd && cfg.POLYGON_API_KEY && symbol) {
-    const poly = await fetchCapPolygon(symbol, cfg.POLYGON_API_KEY);
-    basics.marketCapUsd = poly.marketCapUsd ?? basics.marketCapUsd;
+    const poly = await fetchMarketCaps([symbol]);
+    basics.marketCapUsd = poly.get(symbol);
   }
 
   // Tighten PR body to save tokens
@@ -396,7 +385,6 @@ export async function runLlmCheck(item: ClassifiedItem): Promise<{
       ruleScore: Number((item as any).score ?? 0), // 0..1 or 0..100 — your score is a strong prior
     },
   };
-
   // Stage A: quick web search to confirm the best headline/link
   let verified: { headline?: string; link?: string } | null = null;
   try {
