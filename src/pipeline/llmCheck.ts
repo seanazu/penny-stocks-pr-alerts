@@ -30,9 +30,6 @@ export type LlmEstimation = {
 
 type Basics = { marketCapUsd?: number; price?: number };
 
-const POLY_BASE = "https://api.polygon.io";
-const FMP_BASE = "https://financialmodelingprep.com";
-
 const MODEL = "gpt-5" as const;
 const REASONING_EFFORT: "low" | "medium" | "high" = "medium";
 const MAX_OUT_TOKENS = 80000;
@@ -79,28 +76,6 @@ function formatDiscordDetail(
       est.confidence
     }`,
   ].join("\n");
-}
-
-/* ---------- Data helpers ---------- */
-
-async function fetchLastPriceFMP(
-  ticker: string,
-  apiKey: string
-): Promise<number | undefined> {
-  try {
-    // 5m is cheaper than 1m on quotas; newest-first array
-    const url = `${FMP_BASE}/stable/historical-chart/5min?symbol=${encodeURIComponent(
-      ticker
-    )}&apikey=${encodeURIComponent(apiKey)}`;
-    const r = await fetch(url);
-    if (!r.ok) return undefined;
-    const arr = await r.json();
-    if (Array.isArray(arr) && arr.length) {
-      const close = Number(arr[0]?.close);
-      return Number.isFinite(close) ? close : undefined;
-    }
-  } catch {}
-  return undefined;
 }
 
 /* ---------- LLM plumbing ---------- */
@@ -356,11 +331,7 @@ export async function runLlmCheck(item: ClassifiedItem): Promise<{
     price: undefined,
   };
 
-  if (cfg.FMP_API_KEY && symbol) {
-    const px = await fetchLastPriceFMP(symbol, cfg.FMP_API_KEY);
-    if (px != null) basics.price = px;
-  }
-  if (!basics.marketCapUsd && cfg.POLYGON_API_KEY && symbol) {
+  if (!basics.marketCapUsd && symbol) {
     const poly = await fetchMarketCaps([symbol]);
     basics.marketCapUsd = poly.get(symbol);
   }

@@ -125,7 +125,7 @@ async function newsCycle() {
         capStr = humanCap(out.basics.marketCapUsd);
         pxStr =
           out.basics.price != null ? `$${out.basics.price.toFixed(2)}` : "n/a";
-
+        log.info("[LLM] output", out);
         // estimation
         if (out.est) {
           estBucket = out.est.expected_move.bucket;
