@@ -210,6 +210,11 @@ const WIRE_HOSTS = new Set([
   "www.businesswire.com",
   "www.accesswire.com",
   "www.newsfilecorp.com",
+  // add microcap wires commonly used by OTC issuers
+  "prismmediawire.com",
+  "www.prismmediawire.com",
+  "mcapmediawire.com",
+  "www.mcapmediawire.com",
 ]);
 const WIRE_TOKENS = [
   "PR Newswire",
@@ -217,6 +222,11 @@ const WIRE_TOKENS = [
   "Business Wire",
   "ACCESSWIRE",
   "Newsfile",
+  // tokens used in body banners/footers
+  "MCAP MediaWire",
+  "PRISM MediaWire",
+  "MCAP",
+  "PRISM",
 ];
 function isWirePR(url?: string, text?: string): boolean {
   const t = normalize(text || "");
@@ -281,7 +291,7 @@ const isMaterialMicroDollar = (
 const TIER1_SMALL_VERBS =
   /\b(powered by|built (?:on|with)|integrat(?:es|ed)? with|adopt(?:s|ed)|selects?|standardiz(?:es|ed) on|deploys?|rolls out|invests? in|makes? (?:a )?strategic investment in|expands?|extends?|renews?)\b/i;
 
-/* ---------- Patterns (expanded for micro/OTC) ---------- */
+/* ---------- Patterns (expanded) ---------- */
 const PAT = {
   // Bio / clinical
   pivotal:
@@ -298,9 +308,17 @@ const PAT = {
   designation:
     /\b(breakthrough (?:therapy|device)|BTD|fast[- ]track|orphan (drug )?designation|PRIME|RMAT)\b/i,
   ndaAcceptOrPriority:
-    /\b(FDA|EMA|MHRA|PMDA|NMPA|ANVISA|Health Canada|HC|TGA)\b.*\b(accepts?|accepted)\b.*\b(NDA|BLA|MAA)\b|\b(priority review)\b/i,
+    /\b(FDA|EMA|MHRA|PMDA|NMPA|ANVISA|Health Canada|HC|TGA)\b.*\b(accepts?|accepted|acceptance(?: of| for review)?)\b.*\b((re)?submission|resubmission|NDA|BLA|MAA)\b|\b(priority review)\b/i,
   clinicalHoldLift:
     /\b(FDA)\b.*\b(lifts?|lifted|removes?|removed)\b.*\b(clinical hold)\b/i,
+
+  // *** NEW: generic acquisition announce (micro/OTC phrasing) ***
+  mnaAnnounce:
+    /\b(announce[sd]?|completes?|completed|closes?|closed)\b[^.]{0,40}\b(acquisition|acquire[sd]?|merger)\b/i,
+
+  // Awards PR (add a basic pattern, adjust as needed)
+  awardsPR: /\b(award(?:ed)?|honor(?:ed)?|recognition|prize|winner|winning)\b/i,
+
   strategicAltsOutcome:
     /\b(strategic alternatives|sale process|exploring options|review of alternatives|concluded|completed|outcome|result|sale|transaction)\b.*\b(concluded|completed|resulted|outcome|sale|transaction|agreement|deal)\b/i,
   typoErratum: /\b(typo|erratum|correction|corrects|amended release)\b/i,
@@ -371,7 +389,7 @@ const PAT = {
   specialDividend:
     /\b(special (cash )?dividend)\b.*\$\s?\d+(?:\.\d+)?\s*(?:per|\/)\s*share|\b(special (cash )?dividend of)\s*\$\s?\d+(?:\.\d+)?\b/i,
 
-  // Buybacks / tenders / debt / bankruptcy exit
+  // Buybacks / debt / bankruptcy exit
   buyback:
     /\b(share repurchase|buyback|issuer tender offer|dutch auction)\b.*\b(authorized|authorization|increase|announc(?:es|ed)|commence(?:s|d)|launch(?:es|ed))\b/i,
   debtReduce:
@@ -400,8 +418,6 @@ const PAT = {
     /\b(definitive proxy|proxy (statement|materials)|special meeting|annual meeting|extraordinary general meeting|EGM|shareholder vote|record date)\b/i,
   lawFirmPR:
     /\b(class action|securities class action|investor (?:lawsuit|alert|reminder)|deadline alert|shareholder rights law firm|securities litigation|investigat(?:ion|ing)|Hagens Berman|Pomerantz|Rosen Law Firm|Glancy Prongay|Bronstein[, ]+Gewirtz|Kahn Swick|Saxena White|Kessler Topaz|Levi & Korsinsky)\b/i,
-  awardsPR:
-    /\b(award|awards|winner|wins|finalist|recipient|honoree|recognized|recognition|named (?:as|to) (?:the )?(?:list|index|ranking)|anniversary|celebrat(es|ing|ion))\b/i,
   securityIncidentUpdate:
     /\b(cyber(?:security)?|security|ransomware|data (?:breach|exposure)|cyber[- ]?attack)\b.*\b(update|updated|provid(?:e|es)d? an? update)\b/i,
   investorConfs:
@@ -436,10 +452,9 @@ const PAT = {
   ipoBeginTrade:
     /\b(begins?|commences?)\s+trading\b.*\b(Nasdaq|NYSE|NYSE American)\b/i,
 
+  // --- Micro/OTC specific ---
   nameTickerChange:
     /\b(renam(?:e|ed|es)|name change|changes? (its )?name|ticker (?:symbol )?chang(?:e|es|ed)|to trade under)\b/i,
-
-  // --- Micro/OTC specific ---
   reverseSplit: /\b(reverse(?: |-)?split|stock consolidation)\b/i,
   reverseSplitRatio: /\b(\d{1,3})\s*[-:\/]\s*1\b.*\breverse(?: |-)?split\b/i,
   rsWithUplist:
@@ -550,42 +565,36 @@ function classifyOne(it: RawItem): { event: HighImpactEvent; score: number } {
   );
   push(PAT.clinicalHoldLift.test(x), "PIVOTAL_TRIAL_SUCCESS", 6, "hold_lift");
 
-  // Strong preclinical / cell model
-  if (PAT.preclinNHP.test(x))
-    push(true, "PIVOTAL_TRIAL_SUCCESS", 6, "preclinical_nhp");
-  if (PAT.cellModelEarly.test(x))
-    push(
-      true,
-      "PIVOTAL_TRIAL_SUCCESS",
-      HOT_DISEASE_RX.test(x) ? 6 : 5,
-      "cell_model_early"
-    );
-  if (PAT.singlePivotalPathway.test(x))
-    push(true, "PIVOTAL_TRIAL_SUCCESS", 5, "single_pivotal_pathway");
-
-  // M&A
+  // *** NEW: M&A announce — capture “Announces Acquisition of …” ***
   {
     const binding =
       PAT.mnaBinding.test(x) ||
       (PAT.mnaWillAcquire.test(x) && PAT.mnaPerShareOrValue.test(x));
+    const announce = PAT.mnaAnnounce.test(x); // <— catches WNRS phrasing
     const nonbind = PAT.mnaNonBinding.test(x);
     const admin = PAT.mnaAdminOnly.test(x);
-    const asset = PAT.mnaAssetOrProperty.test(x);
+    const asset = PAT.mnaAssetOrProperty.test(x); // avoid asset/property noise
     const unsolicited = PAT.mnaUnsolicitedProposal.test(x);
     const hasPremium = PAT.mnaPremiumMention.test(x);
 
+    // Definitive/priced → strong
     push(
       binding && !nonbind && !admin && !asset,
       "ACQUISITION_BUYOUT",
       9,
       "mna_binding"
     );
+
+    // Announced/closed acquisitions (unpriced/off-wire microcaps still move)
+    push(announce && !asset, "ACQUISITION_BUYOUT", 7, "mna_announce");
+
     push(
       unsolicited && !admin && !asset,
       "ACQUISITION_BUYOUT",
       6,
       "mna_unsolicited_priced"
     );
+
     if (nonbind || admin || asset) push(true, "OTHER", 2, "mna_low_impact");
 
     push(
@@ -761,7 +770,7 @@ function classifyOne(it: RawItem): { event: HighImpactEvent; score: number } {
   if (PAT.asReduced.test(x))
     push(true, "AUTHORIZED_SHARES_REDUCED", 6, "authorized_shares_reduced");
 
-  // Distribution / orders: accept smaller $ as material if named chains/regions
+  // Distribution / orders
   if (PAT.distributionDeal.test(x) || PAT.purchaseOrder.test(x)) {
     const { material, major } = isMaterialMicroDollar(x);
     const namedChains = PAT.retailChains.test(x);
@@ -774,7 +783,7 @@ function classifyOne(it: RawItem): { event: HighImpactEvent; score: number } {
     );
   }
 
-  // AI/crypto pivots (keep but require concrete action words)
+  // AI/crypto pivots (require concrete action words)
   if (
     PAT.aiPivot.test(x) &&
     /(launch|deploy|integrat|contract|order|revenue|customer|PO|purchase|binding)/i.test(
