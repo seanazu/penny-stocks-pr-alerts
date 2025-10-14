@@ -91,15 +91,51 @@ function formatDiscordDetail(
 }
 
 /* ---------- LLM plumbing ---------- */
+// ---------- DROP-IN: robust extractor ----------
 function extractOutputText(resp: any): string {
-  if (typeof resp?.output_text === "string") return resp.output_text.trim();
-  const blocks: any[] = Array.isArray(resp?.output) ? resp.output : [];
-  const txt = blocks
-    .filter((b: any) => b?.type === "output_text")
-    .map((b: any) => b.text)
-    .join("")
-    .trim();
-  return txt || "";
+  // 1) Fast path (Responses API)
+  if (typeof resp?.output_text === "string" && resp.output_text.trim()) {
+    return resp.output_text.trim();
+  }
+
+  // 2) Responses API "output" blocks → message content/text
+  if (Array.isArray(resp?.output)) {
+    const texts: string[] = [];
+    for (const blk of resp.output) {
+      // Some SDKs put message under blk.content[{type:"output_text"|...}]
+      const maybeContent = blk?.content;
+      if (Array.isArray(maybeContent)) {
+        for (const c of maybeContent) {
+          const t = c?.text ?? c?.output_text ?? c?.value ?? "";
+          if (typeof t === "string" && t.trim()) texts.push(t);
+        }
+      }
+      // Some put text directly on the block
+      const direct = blk?.text ?? blk?.output_text;
+      if (typeof direct === "string" && direct.trim()) texts.push(direct);
+    }
+    const joined = texts.join("").trim();
+    if (joined) return joined;
+  }
+
+  // 3) Legacy chat shape fallback (rare if you're using Responses API)
+  const choice0 = resp?.choices?.[0];
+  const legacyText =
+    choice0?.message?.content ??
+    choice0?.delta?.content ??
+    resp?.message?.content ??
+    "";
+  if (typeof legacyText === "string" && legacyText.trim()) {
+    return legacyText.trim();
+  }
+
+  // 4) Last-ditch: try to find a fenced JSON block anywhere
+  const raw = typeof resp === "string" ? resp : JSON.stringify(resp);
+  const fence =
+    raw.match(/```json\s*([\s\S]*?)\s*```/i)?.[1] ||
+    raw.match(/```\s*([\s\S]*?)\s*```/i)?.[1] ||
+    "";
+  return (fence || "").trim();
 }
 
 // ---------- helpers ----------
@@ -126,6 +162,7 @@ function bucketFromP90(p90: number) {
   return "<5%";
 }
 
+// ---------- DROP-IN: replace sanitizeEstimation ----------
 // ---------- DROP-IN: replace sanitizeEstimation ----------
 function sanitizeEstimation(raw: any): {
   est: LlmEstimation | null;
@@ -166,7 +203,7 @@ function sanitizeEstimation(raw: any): {
           .slice(0, 8)
       : [];
 
-  // Support root or nested shapes seamlessly
+  // Support both { est: {...} } and flat {...}
   const node =
     raw?.est && (raw.est.expected_move || raw.est.expectedMove) ? raw.est : raw;
 
@@ -176,13 +213,35 @@ function sanitizeEstimation(raw: any): {
 
   if (!isFinite(p50)) p50 = 0;
   if (!isFinite(p90)) p90 = p50;
+
+  // Clamp range
   p50 = Math.max(0, Math.min(1000, p50));
   p90 = Math.max(p50, Math.min(1000, p90));
 
-  const bucket: MoveBucket = BUCKETS.includes(em.bucket)
-    ? em.bucket
-    : (bucketFromP90(p90) as MoveBucket);
+  // Derive/validate bucket
+  const bucket: MoveBucket = ((): MoveBucket => {
+    const b = em.bucket as MoveBucket;
+    return BUCKETS.includes(b) ? b : (bucketFromP90(p90) as MoveBucket);
+  })();
 
+  // If p50==p90, apply a tiny bucket-aware nudge to p90 so P90 > P50
+  if (p90 === p50) {
+    const epsilonByBucket: Record<MoveBucket, number> = {
+      "<5%": 0.5,
+      "5-10%": 1,
+      "10-20%": 1.5,
+      "20-40%": 2,
+      "40-80%": 3,
+      "80-150%": 4,
+      "150-300%": 5,
+      "300-500%": 6,
+      "500%+": 8,
+    };
+    const eps = epsilonByBucket[bucket] ?? 2;
+    p90 = Math.min(1000, p50 + eps);
+  }
+
+  // Confidence + strength
   const confRaw = String(node.confidence ?? "").toLowerCase();
   const confidence: "low" | "medium" | "high" =
     confRaw === "high" ? "high" : confRaw === "medium" ? "medium" : "low";
@@ -199,7 +258,6 @@ function sanitizeEstimation(raw: any): {
     confidence,
     rationale_short: String(node.rationale_short ?? "").slice(0, 240),
     blurb: String(node.blurb ?? "").slice(0, 300),
-    // headline/link OPTIONAL — we’re not overriding your canonical PR, so omit
   };
 
   // optional basics.price (root or nested)
