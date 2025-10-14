@@ -138,19 +138,6 @@ export async function fetchFmpPressReleases(
         page,
         error: (e as any)?.message,
       });
-      try {
-        const { data: legacyData } = await axios.get(legacyBase, {
-          params: { page, apikey: cfg.FMP_API_KEY },
-          timeout: 8000,
-        });
-        data = legacyData;
-      } catch (ee) {
-        log.warn("[FMP] legacy press-releases failed", {
-          page,
-          error: (ee as any)?.message,
-        });
-        continue; // try next page
-      }
     }
 
     const rows: any[] = Array.isArray(data)

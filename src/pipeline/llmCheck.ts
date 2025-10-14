@@ -24,15 +24,27 @@ export type LlmEstimation = {
   confidence: "low" | "medium" | "high";
   rationale_short: string; // <= 240 chars
   blurb: string; // 2–3 sentences, <= 300 chars
-  headline?: string; // best verified headline (if found)
-  link?: string; // best verified link (if found)
 };
 
 type Basics = { marketCapUsd?: number; price?: number };
 
+export type LlmOut = {
+  basics: Basics;
+  est: LlmEstimation | null;
+  blurb: string;
+  details: string;
+  strengthBucket: string;
+  confidenceEmoji: string;
+  // new extras:
+  pros?: string[];
+  cons?: string[];
+  red_flags?: string[];
+  sources?: { title: string; url: string; publishedISO?: string }[];
+};
+
 const MODEL = "gpt-5" as const;
 const REASONING_EFFORT: "low" | "medium" | "high" = "medium";
-const MAX_OUT_TOKENS = 80000;
+const MAX_OUT_TOKENS = 80_000;
 
 /* ---------- Display helpers ---------- */
 function strengthToBucket(s?: number): { name: string; emoji: string } {
@@ -79,58 +91,6 @@ function formatDiscordDetail(
 }
 
 /* ---------- LLM plumbing ---------- */
-function sanitizeEstimation(raw: any): LlmEstimation | null {
-  const BUCKETS: MoveBucket[] = [
-    "<5%",
-    "5-10%",
-    "10-20%",
-    "20-40%",
-    "40-80%",
-    "80-150%",
-    "150-300%",
-    "300-500%",
-    "500%+",
-  ];
-  try {
-    if (!raw || typeof raw !== "object") return null;
-    const label = String(raw.label ?? "OTHER");
-    const catalyst_strength = Math.max(
-      0,
-      Math.min(1, Number(raw.catalyst_strength ?? 0))
-    );
-    const confidence: "low" | "medium" | "high" =
-      raw.confidence === "high" || raw.confidence === "medium"
-        ? raw.confidence
-        : "low";
-    const rationale_short = String(raw.rationale_short ?? "").slice(0, 240);
-    const blurb = String(raw.blurb ?? "").slice(0, 300);
-    const em = raw.expected_move ?? {};
-    let p50 = Number(em.p50 ?? 0);
-    let p90 = Number(em.p90 ?? 0);
-    if (!Number.isFinite(p50)) p50 = 0;
-    if (!Number.isFinite(p90)) p90 = p50;
-    p50 = Math.max(0, Math.min(1000, p50));
-    p90 = Math.max(p50, Math.min(1000, p90));
-    const bucket: MoveBucket = BUCKETS.includes(em.bucket) ? em.bucket : "<5%";
-    const headline =
-      typeof raw.headline === "string" ? raw.headline.slice(0, 280) : undefined;
-    const link = typeof raw.link === "string" ? raw.link : undefined;
-
-    return {
-      label,
-      catalyst_strength,
-      expected_move: { p50, p90, bucket },
-      confidence,
-      rationale_short,
-      blurb,
-      headline,
-      link,
-    };
-  } catch {
-    return null;
-  }
-}
-
 function extractOutputText(resp: any): string {
   if (typeof resp?.output_text === "string") return resp.output_text.trim();
   const blocks: any[] = Array.isArray(resp?.output) ? resp.output : [];
@@ -142,184 +102,137 @@ function extractOutputText(resp: any): string {
   return txt || "";
 }
 
-/* ---------- Prompts ---------- */
-function system_discover(ticker: string) {
-  return [
-    `You are verifying the latest catalyst for ${ticker}.`,
-    `Use web_search to find 1–3 credible items: prioritize issuer IR/wire (PR Newswire, GlobeNewswire, Business Wire, Accesswire, Newsfile), SEC 8-K/6-K, or reputable outlets (Reuters, Bloomberg).`,
-    `Prefer items from the last 120 minutes; otherwise within the last 24 hours.`,
-    `Return STRICT JSON only: {"candidates":[{"title":"...","url":"...","publisher":"...","publishedISO":"YYYY-MM-DDTHH:mm:ssZ","bodySnippet":"<=600 chars"}]}`,
-    `No commentary or extra keys.`,
-  ].join("\n");
+function sanitizeEstimation(raw: any): {
+  est: LlmEstimation | null;
+  pros: string[];
+  cons: string[];
+  red_flags: string[];
+  sources: { title: string; url: string; publishedISO?: string }[];
+  price?: number;
+} {
+  const BUCKETS: MoveBucket[] = [
+    "<5%",
+    "5-10%",
+    "10-20%",
+    "20-40%",
+    "40-80%",
+    "80-150%",
+    "150-300%",
+    "300-500%",
+    "500%+",
+  ];
+  const okStrArr = (x: any) =>
+    Array.isArray(x)
+      ? x
+          .map((s) => String(s || "").trim())
+          .filter(Boolean)
+          .slice(0, 8)
+      : [];
+  const okSources = (xs: any) =>
+    Array.isArray(xs)
+      ? xs
+          .map((s) => ({
+            title: String(s?.title || "").slice(0, 160),
+            url: typeof s?.url === "string" ? s.url : "",
+            publishedISO:
+              typeof s?.publishedISO === "string" ? s.publishedISO : undefined,
+          }))
+          .filter((s) => s.title && s.url)
+          .slice(0, 8)
+      : [];
+
+  try {
+    const em = raw?.est ?? {};
+    let p50 = Number(em.p50 ?? 0);
+    let p90 = Number(em.p90 ?? 0);
+    if (!Number.isFinite(p50)) p50 = 0;
+    if (!Number.isFinite(p90)) p90 = p50;
+    p50 = Math.max(0, Math.min(1000, p50));
+    p90 = Math.max(p50, Math.min(1000, p90));
+
+    const est: LlmEstimation | null = raw?.est
+      ? {
+          label: String(em.label ?? "OTHER"),
+          catalyst_strength: Math.max(
+            0,
+            Math.min(1, Number(em.catalyst_strength ?? 0))
+          ),
+          expected_move: {
+            p50,
+            p90,
+            bucket: BUCKETS.includes(em.bucket) ? em.bucket : "<5%",
+          },
+          confidence:
+            em.confidence === "high" || em.confidence === "medium"
+              ? em.confidence
+              : "low",
+          rationale_short: String(em.rationale_short ?? "").slice(0, 240),
+          blurb: String(em.blurb ?? "").slice(0, 300),
+        }
+      : null;
+
+    return {
+      est,
+      pros: okStrArr(raw?.pros),
+      cons: okStrArr(raw?.cons),
+      red_flags: okStrArr(raw?.red_flags),
+      sources: okSources(raw?.sources),
+      price:
+        raw?.basics && Number.isFinite(Number(raw?.basics?.price))
+          ? Number(raw?.basics?.price)
+          : undefined,
+    };
+  } catch {
+    return { est: null, pros: [], cons: [], red_flags: [], sources: [] };
+  }
 }
 
-function system_estimate() {
+/* ---------- Prompts ---------- */
+function system_background() {
   return [
     "You are an event-driven equities analyst for micro/OTC names.",
-    "Mission: estimate the near-term move from the press release.",
+    "You are given ONE canonical press release (headline, link, time, wire). DO NOT replace it.",
+    "Use web_search ONLY to gather CONTEXT (older articles, filings, IR pages, analyst notes, sector news) and basic financial facts.",
+    "Focus window: 12–24 months history; include last 24 hours if relevant.",
+    "",
+    "Return STRICT JSON with keys:",
+    `{
+      "est": {
+        "label": "string",
+        "catalyst_strength": 0..1,
+        "expected_move": { "p50": 0..1000, "p90": 0..1000, "bucket": "<5%"|"5-10%"|"10-20%"|"20-40%"|"40-80%"|"80-150%"|"150-300%"|"300-500%"|"500%+" },
+        "confidence": "low"|"medium"|"high",
+        "rationale_short": "<=240 chars",
+        "blurb": "2-3 sentences, <=300 chars"
+      },
+      "pros": ["bullet", "..."],
+      "cons": ["bullet", "..."],
+      "red_flags": ["bullet", "..."],
+      "sources": [{"title":"...", "url":"...", "publishedISO":"YYYY-MM-DDTHH:mm:ssZ"}],
+      "basics": {"price": number|null}
+    }`,
     "",
     "Rules:",
-    "- Use the verified catalyst (headline/link) if provided; otherwise use the press_release title/body.",
-    "- Align move ranges with micro-cap behavior: approvals/definitive M&A/cash-per-share → higher tails; soft updates → modest.",
-    "- Consider market cap and price (smaller = more volatile), some can go up more than a thousand percent in one day.",
-    "- Be conservative when confidence is low or evidence is weak.",
-    "- For mega/large caps, cap the typical move to <20-40% unless exceptional.",
-    "",
-    "Output STRICT JSON only with exactly these keys:",
-    `{"label": "...", "catalyst_strength": 0..1, "expected_move": {"p50":0..1000, "p90":0..1000, "bucket":"<5%"|"5-10%"|"10-20%"|"20-40%"|"40-80%"|"80-150%"|"150-300%"|"300-500%"|"500%+"}, "confidence":"low"|"medium"|"high", "rationale_short":"<=240 chars", "blurb":"2-3 sentences <=300 chars", "headline":"(optional) best headline", "link":"(optional) url"}`,
-    "",
-    "Sanity:",
-    "- p90 >= p50; both are percentages of potential upside today/very near-term.",
-    "- If insufficient evidence, set confidence='low' and keep bucket small.",
+    "- Never suggest a different primary headline/link. Treat given PR as canonical.",
+    "- Be concise; avoid fluff; use credible sources only (IR/wires/SEC/Reuters/Bloomberg).",
+    "- For micro/OTC, be explicit about financing risk, going-concern language, reverse splits, shelf filings, or serial dilutions if relevant.",
+    "- If evidence is weak, keep confidence low and bucket small.",
   ].join("\n");
 }
 
-/* ---------- Stages: discover → estimate ---------- */
-async function discoverCatalyst(ticker: string): Promise<{
-  headline?: string;
-  link?: string;
-} | null> {
-  const apiKey = process.env.OPENAI_API_KEY || cfg.OPENAI_API_KEY;
-  if (!apiKey) return null;
-  const client = new OpenAI({
-    apiKey,
-    baseURL: process.env.OPENAI_BASE_URL || undefined,
-    maxRetries: 3,
-  });
-
-  const resp = await client.responses.create({
-    model: MODEL,
-    tools: [{ type: "web_search" }],
-    tool_choice: "auto",
-    reasoning: { effort: REASONING_EFFORT },
-    max_output_tokens: 80000,
-    instructions: system_discover(ticker),
-    input: [
-      {
-        role: "user",
-        content: [
-          { type: "input_text", text: `Ticker: ${ticker}\nReturn JSON only.` },
-        ],
-      },
-    ],
-    metadata: { purpose: "catalyst_discovery", ticker },
-  } as any);
-  log.info("[LLM] discover catalyst response", resp);
-
-  const text = extractOutputText(resp);
-  let candidates: any[] | undefined;
-  try {
-    const parsed = JSON.parse(text);
-    if (
-      parsed &&
-      Array.isArray(parsed.candidates) &&
-      parsed.candidates.length
-    ) {
-      candidates = parsed.candidates;
-    }
-  } catch (error) {
-    log.warn("[LLM] discovery parse error", { ticker, text, error });
+/* ---------- Main ---------- */
+export async function runLlmCheck(
+  item: ClassifiedItem,
+  opts?: {
+    canonical?: {
+      headline: string;
+      url: string;
+      publishedAt: string | null;
+      wire: string | null;
+    };
+    maxSources?: number; // default 5
   }
-
-  if (!candidates?.length) return null;
-
-  // Prefer issuer IR/wire/reuters/bloomberg
-  const weight = (url = "", publisher = "") => {
-    const host = (() => {
-      try {
-        return new URL(url).hostname.toLowerCase();
-      } catch {
-        return "";
-      }
-    })();
-    const p = (publisher || "").toLowerCase();
-    if (host.startsWith("investor.") || host.startsWith("ir.")) return 5;
-    if (
-      /(prnewswire|globenewswire|businesswire|accesswire|newsfile)/.test(host)
-    )
-      return 5;
-    if (/(reuters|bloomberg)\./.test(host)) return 4;
-    if (/sec\.gov/.test(host)) return 4;
-    if (!url) return 0;
-    return 1;
-  };
-
-  candidates.sort((a, b) => {
-    const wa = weight(a.url, a.publisher);
-    const wb = weight(b.url, b.publisher);
-    if (wb !== wa) return wb - wa;
-    const ta = a.publishedISO ? Date.parse(a.publishedISO) : 0;
-    const tb = b.publishedISO ? Date.parse(b.publishedISO) : 0;
-    return tb - ta;
-  });
-
-  const top = candidates[0];
-  return { headline: top?.title, link: top?.url };
-}
-
-async function estimateMove(
-  payload: any,
-  verified?: { headline?: string; link?: string } | null
-): Promise<LlmEstimation | null> {
-  const apiKey = process.env.OPENAI_API_KEY || cfg.OPENAI_API_KEY;
-  if (!apiKey) return null;
-
-  const client = new OpenAI({
-    apiKey,
-    baseURL: process.env.OPENAI_BASE_URL || undefined,
-  });
-
-  const merged = {
-    ...payload,
-    verified_headline: verified?.headline ?? null,
-    verified_link: verified?.link ?? null,
-  };
-
-  const resp = await client.responses.create({
-    model: MODEL,
-    tools: [{ type: "web_search" }], // allow a quick follow-up check if needed
-    tool_choice: "auto",
-    reasoning: { effort: REASONING_EFFORT },
-    max_output_tokens: MAX_OUT_TOKENS,
-    instructions: system_estimate(),
-    input: [
-      {
-        role: "user",
-        content: [{ type: "input_text", text: JSON.stringify(merged) }],
-      },
-    ],
-    metadata: {
-      purpose: "press_release_move_estimate",
-      ticker: payload?.ticker,
-    },
-  } as any);
-  log.info("[LLM] estimate move response", resp);
-
-  const text = extractOutputText(resp);
-  try {
-    return sanitizeEstimation(JSON.parse(text));
-  } catch (e) {
-    log.warn("[LLM] estimation parse error", e);
-
-    const m = text?.match(/\{[\s\S]*\}$/m);
-    if (m) {
-      try {
-        return sanitizeEstimation(JSON.parse(m[0]));
-      } catch {}
-    }
-    return null;
-  }
-}
-
-/* ---------- Public entry ---------- */
-export async function runLlmCheck(item: ClassifiedItem): Promise<{
-  basics: Basics;
-  est: LlmEstimation | null;
-  blurb: string;
-  details: string;
-  strengthBucket: string;
-  confidenceEmoji: string;
-}> {
+): Promise<LlmOut> {
   const symbol = item.symbols?.[0];
 
   // Basics from pipeline / APIs
@@ -339,35 +252,90 @@ export async function runLlmCheck(item: ClassifiedItem): Promise<{
   // Tighten PR body to save tokens
   const body = (item.summary || "").slice(0, 3000);
 
-  // Build payload (don’t re-detect label; trust your classifier)
+  const canonical = {
+    headline: opts?.canonical?.headline ?? item.title ?? "",
+    url: opts?.canonical?.url ?? item.url ?? "",
+    time_utc: opts?.canonical?.publishedAt ?? item.publishedAt ?? null,
+    wire: opts?.canonical?.wire ?? item.source ?? null,
+  };
+
   const payload = {
     ticker: symbol ?? "NA",
     press_release: {
-      title: item.title ?? "",
+      title: canonical.headline,
       body,
-      wire: item.source ?? null,
-      url: item.url ?? null,
-      time_utc: item.publishedAt ?? null,
+      wire: canonical.wire,
+      url: canonical.url,
+      time_utc: canonical.time_utc,
     },
     features: {
       marketCapUsd: basics.marketCapUsd ?? null,
       price: basics.price ?? null,
       ruleLabel: String(item.klass ?? "OTHER"),
-      ruleScore: Number((item as any).score ?? 0), // 0..1 or 0..100 — your score is a strong prior
+      ruleScore: Number((item as any).score ?? 0),
     },
   };
-  // Stage A: quick web search to confirm the best headline/link
-  let verified: { headline?: string; link?: string } | null = null;
-  try {
-    if (symbol && (process.env.OPENAI_API_KEY || cfg.OPENAI_API_KEY)) {
-      verified = await discoverCatalyst(symbol);
+
+  const apiKey = process.env.OPENAI_API_KEY || cfg.OPENAI_API_KEY;
+  let modelOut: ReturnType<typeof sanitizeEstimation> | null = null;
+
+  if (apiKey) {
+    const client = new OpenAI({
+      apiKey,
+      baseURL: process.env.OPENAI_BASE_URL || undefined,
+    });
+
+    // One pass: background + estimate (with web_search allowed)
+    const resp = await client.responses.create({
+      model: MODEL,
+      tools: [{ type: "web_search" }],
+      tool_choice: "auto",
+      reasoning: { effort: REASONING_EFFORT },
+      max_output_tokens: MAX_OUT_TOKENS,
+      instructions: system_background(),
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text:
+                "Canonical press release (do not replace): " +
+                JSON.stringify({
+                  headline: canonical.headline,
+                  url: canonical.url,
+                  time_utc: canonical.time_utc,
+                  wire: canonical.wire,
+                }) +
+                "\n\n" +
+                "Pipeline payload:\n" +
+                JSON.stringify(payload),
+            },
+          ],
+        },
+      ],
+      metadata: {
+        purpose: "background_context_and_estimate",
+        ticker: payload.ticker,
+      },
+    } as any);
+
+    const text = extractOutputText(resp);
+    try {
+      modelOut = sanitizeEstimation(JSON.parse(text));
+    } catch (e) {
+      log.warn("[LLM] parse error", e);
+      const m = text?.match(/\{[\s\S]*\}$/m);
+      if (m) {
+        try {
+          modelOut = sanitizeEstimation(JSON.parse(m[0]));
+        } catch {}
+      }
     }
-  } catch (e) {
-    log.warn("[LLM] discovery error", (e as any)?.message || e);
   }
 
-  // Stage B: estimate move using all inputs
-  const est = await estimateMove(payload, verified);
+  // Compose final output
+  const est = modelOut?.est ?? null;
   const blurb = est?.blurb || "Quick take unavailable.";
   const details = formatDiscordDetail(symbol || "?", basics, est || null);
 
@@ -376,10 +344,10 @@ export async function runLlmCheck(item: ClassifiedItem): Promise<{
   const strengthBucket = `${sb.emoji} ${sb.name} (${Math.round(sVal * 100)}%)`;
   const confEmoji = confidenceEmoji(est?.confidence);
 
-  // attach verified headline if the model didn’t set it
-  if (est && verified && !est.headline && verified.headline)
-    est.headline = verified.headline;
-  if (est && verified && !est.link && verified.link) est.link = verified.link;
+  // Price if model provided
+  if (modelOut?.price != null && Number.isFinite(Number(modelOut.price))) {
+    basics.price = Number(modelOut.price);
+  }
 
   return {
     basics,
@@ -388,5 +356,12 @@ export async function runLlmCheck(item: ClassifiedItem): Promise<{
     details,
     strengthBucket,
     confidenceEmoji: confEmoji,
+    pros: modelOut?.pros ?? [],
+    cons: modelOut?.cons ?? [],
+    red_flags: modelOut?.red_flags ?? [],
+    sources: (modelOut?.sources || []).slice(
+      0,
+      Math.max(1, Math.min(8, opts?.maxSources ?? 5))
+    ),
   };
 }
