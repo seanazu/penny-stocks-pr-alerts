@@ -102,6 +102,31 @@ function extractOutputText(resp: any): string {
   return txt || "";
 }
 
+// ---------- helpers ----------
+function parsePctAny(x: any): number {
+  // Accept "12%", "12.3%", "0.12", 0.12, "12", 12 -> percent (0..1000)
+  if (x == null) return NaN;
+  if (typeof x === "number") return x <= 1 ? x * 100 : x;
+  const s = String(x).trim();
+  if (!s) return NaN;
+  const hasPct = /%$/.test(s);
+  const n = parseFloat(s.replace("%", ""));
+  if (!isFinite(n)) return NaN;
+  return hasPct ? n : n <= 1 ? n * 100 : n;
+}
+function bucketFromP90(p90: number) {
+  if (p90 >= 500) return "500%+";
+  if (p90 >= 300) return "300-500%";
+  if (p90 >= 150) return "150-300%";
+  if (p90 >= 80) return "80-150%";
+  if (p90 >= 40) return "40-80%";
+  if (p90 >= 20) return "20-40%";
+  if (p90 >= 10) return "10-20%";
+  if (p90 >= 5) return "5-10%";
+  return "<5%";
+}
+
+// ---------- DROP-IN: replace sanitizeEstimation ----------
 function sanitizeEstimation(raw: any): {
   est: LlmEstimation | null;
   pros: string[];
@@ -121,70 +146,78 @@ function sanitizeEstimation(raw: any): {
     "300-500%",
     "500%+",
   ];
-  const okStrArr = (x: any) =>
-    Array.isArray(x)
-      ? x
-          .map((s) => String(s || "").trim())
+  const arr = (xs: any) =>
+    Array.isArray(xs)
+      ? xs
+          .map((s) => String(s ?? "").trim())
           .filter(Boolean)
           .slice(0, 8)
       : [];
-  const okSources = (xs: any) =>
+  const srcs = (xs: any) =>
     Array.isArray(xs)
       ? xs
           .map((s) => ({
-            title: String(s?.title || "").slice(0, 160),
+            title: String(s?.title ?? "").slice(0, 160),
             url: typeof s?.url === "string" ? s.url : "",
             publishedISO:
               typeof s?.publishedISO === "string" ? s.publishedISO : undefined,
           }))
-          .filter((s) => s.title && s.url)
+          .filter((x) => x.title && x.url)
           .slice(0, 8)
       : [];
 
-  try {
-    const em = raw?.est ?? {};
-    let p50 = Number(em.p50 ?? 0);
-    let p90 = Number(em.p90 ?? 0);
-    if (!Number.isFinite(p50)) p50 = 0;
-    if (!Number.isFinite(p90)) p90 = p50;
-    p50 = Math.max(0, Math.min(1000, p50));
-    p90 = Math.max(p50, Math.min(1000, p90));
+  // Support root or nested shapes seamlessly
+  const node =
+    raw?.est && (raw.est.expected_move || raw.est.expectedMove) ? raw.est : raw;
 
-    const est: LlmEstimation | null = raw?.est
-      ? {
-          label: String(em.label ?? "OTHER"),
-          catalyst_strength: Math.max(
-            0,
-            Math.min(1, Number(em.catalyst_strength ?? 0))
-          ),
-          expected_move: {
-            p50,
-            p90,
-            bucket: BUCKETS.includes(em.bucket) ? em.bucket : "<5%",
-          },
-          confidence:
-            em.confidence === "high" || em.confidence === "medium"
-              ? em.confidence
-              : "low",
-          rationale_short: String(em.rationale_short ?? "").slice(0, 240),
-          blurb: String(em.blurb ?? "").slice(0, 300),
-        }
-      : null;
+  const em = node.expected_move ?? node.expectedMove ?? {};
+  let p50 = parsePctAny(em.p50);
+  let p90 = parsePctAny(em.p90);
 
-    return {
-      est,
-      pros: okStrArr(raw?.pros),
-      cons: okStrArr(raw?.cons),
-      red_flags: okStrArr(raw?.red_flags),
-      sources: okSources(raw?.sources),
-      price:
-        raw?.basics && Number.isFinite(Number(raw?.basics?.price))
-          ? Number(raw?.basics?.price)
-          : undefined,
-    };
-  } catch {
-    return { est: null, pros: [], cons: [], red_flags: [], sources: [] };
+  if (!isFinite(p50)) p50 = 0;
+  if (!isFinite(p90)) p90 = p50;
+  p50 = Math.max(0, Math.min(1000, p50));
+  p90 = Math.max(p50, Math.min(1000, p90));
+
+  const bucket: MoveBucket = BUCKETS.includes(em.bucket)
+    ? em.bucket
+    : (bucketFromP90(p90) as MoveBucket);
+
+  const confRaw = String(node.confidence ?? "").toLowerCase();
+  const confidence: "low" | "medium" | "high" =
+    confRaw === "high" ? "high" : confRaw === "medium" ? "medium" : "low";
+
+  const csNum = Number(node.catalyst_strength);
+  const catalyst_strength = isFinite(csNum)
+    ? Math.max(0, Math.min(1, csNum))
+    : 0;
+
+  const est: LlmEstimation = {
+    label: String(node.label ?? "OTHER"),
+    catalyst_strength,
+    expected_move: { p50, p90, bucket },
+    confidence,
+    rationale_short: String(node.rationale_short ?? "").slice(0, 240),
+    blurb: String(node.blurb ?? "").slice(0, 300),
+    // headline/link OPTIONAL — we’re not overriding your canonical PR, so omit
+  };
+
+  // optional basics.price (root or nested)
+  let price: number | undefined;
+  const basicsAny = raw?.basics ?? node?.basics;
+  if (basicsAny?.price != null) {
+    const pv = Number(basicsAny.price);
+    if (isFinite(pv)) price = pv;
   }
+
+  return {
+    est,
+    pros: arr(raw?.pros ?? node?.pros),
+    cons: arr(raw?.cons ?? node?.cons),
+    red_flags: arr(raw?.red_flags ?? node?.red_flags),
+    sources: srcs(raw?.sources ?? node?.sources),
+    price,
+  };
 }
 
 /* ---------- Prompts ---------- */
