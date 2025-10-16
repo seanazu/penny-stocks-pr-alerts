@@ -21,6 +21,32 @@ interface FetchBenzingaPressReleases {
   lookbackMinutes?: number;
 }
 
+// src/utils/filterMajorExchanges.ts
+export function filterMajorExchanges(items: RawItem[]) {
+  // Match common major exchanges (U.S. and global), but NOT OTC.
+  const MAJOR_EXCHANGES = [
+    /\bNASDAQ\b/i,
+    /\bnasdaq\b/i,
+    /\bNYSE\b/i,
+    /\bAMEX\b/i,
+    /\bTSX\b/i,
+    /\bCSE\b/i,
+    /\bASX\b/i,
+    /\bLSE\b/i,
+    /\bEuronext\b/i,
+    /\bFrankfurt\b/i,
+    /\bTokyo\s+Stock\s+Exchange\b/i,
+    /\bHong\s*Kong\s*Exchange\b/i,
+  ];
+
+  return [...items].filter((a) => {
+    const content = `${a.title ?? ""} ${a.summary ?? ""}`;
+    // keep only if it does NOT mention any of the major exchanges
+    const hasMajorExchange = MAJOR_EXCHANGES.some((re) => re.test(content));
+    return a.symbols?.[0] !== "GTLL" && !hasMajorExchange;
+  });
+}
+
 /** --- Small helper: fetch market caps for a set of symbols (batched) --- */
 export async function fetchMarketCaps(
   symbols: string[]
@@ -63,12 +89,7 @@ export async function fetchMarketCaps(
 export async function fetchFmpPressReleases(
   params: FetchBenzingaPressReleases = {}
 ): Promise<RawItem[]> {
-  const {
-    maxPages = 1,
-    minMarketCap = 0,
-    maxMarketCap = 30_000_000,
-    includeUnknownMktCap = false,
-  } = params;
+  const { maxPages = 1 } = params;
 
   const out: RawItem[] = [];
 
@@ -121,7 +142,6 @@ export async function fetchFmpPressReleases(
 
   const stableBase =
     "https://financialmodelingprep.com/stable/news/press-releases-latest";
-  const legacyBase = "https://financialmodelingprep.com/api/v3/press-releases";
 
   for (let page = 0; page < maxPages; page++) {
     // Try STABLE first; if it fails, fall back to LEGACY for this page
@@ -163,32 +183,43 @@ export async function fetchFmpPressReleases(
 
   log.info("[FMP] total raw PR items", { items: out.length });
   if (!out.length) return out;
-
-  // --- Resolve caps, then filter (same logic as Benzinga) ---
-  const uniqueSymbols = Array.from(
-    new Set(out.flatMap((it) => (Array.isArray(it.symbols) ? it.symbols : [])))
-  ).filter(Boolean);
-
-  const capMap = await fetchMarketCaps(uniqueSymbols);
-
-  const passesCapFilter = (item: RawItem): boolean => {
-    const sym = item.symbols?.[0];
-    if (!sym) return includeUnknownMktCap;
-
-    const cap = capMap.get(sym);
-    if (!Number.isFinite(cap)) return includeUnknownMktCap;
-
-    if (typeof minMarketCap === "number" && (cap as number) < minMarketCap)
-      return false;
-    if (typeof maxMarketCap === "number" && (cap as number) > maxMarketCap)
-      return false;
-    return true;
-  };
-
-  const filtered = out.filter(passesCapFilter);
-
-  return filtered;
+  return filterMajorExchanges(out);
 }
+
+const passesCapFilter = (
+  item: RawItem,
+  capMap: Map<string, number>,
+  minMarketCap: number,
+  maxMarketCap: number
+): boolean => {
+  const sym = item.symbols?.[0];
+  if (!sym) return true;
+
+  const cap = capMap.get(sym);
+  // If we don't have a cap, we can't filter by it
+  if (!Number.isFinite(cap)) return true;
+
+  if (typeof minMarketCap === "number" && (cap as number) < minMarketCap)
+    return false;
+  if (typeof maxMarketCap === "number" && (cap as number) > maxMarketCap)
+    return false;
+  return true;
+};
+
+export const isMarketCapValid = async ({
+  item,
+  minMarketCap,
+  maxMarketCap,
+}: {
+  item: RawItem;
+  minMarketCap: number;
+  maxMarketCap: number;
+}): Promise<boolean> => {
+  if (!item.symbols?.length) return true;
+  const capMap = await fetchMarketCaps(item.symbols || []);
+
+  return passesCapFilter(item, capMap, minMarketCap, maxMarketCap);
+};
 
 const APIKEY = cfg.FMP_API_KEY; // <-- your FMP key (unchanged for functions below)
 

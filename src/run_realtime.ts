@@ -5,7 +5,11 @@ import { classify } from "./pipeline/classify.js";
 import { score } from "./pipeline/score.js";
 import { log } from "./logger.js";
 import { notifyDiscord } from "./notify/discord.js";
-import { fetchFmpPressReleases, isExchangeOk } from "./providers/fmp.js";
+import {
+  fetchFmpPressReleases,
+  isExchangeOk,
+  isMarketCapValid,
+} from "./providers/fmp.js";
 import { runLlmCheck } from "./pipeline/llmCheck.js";
 
 const nowIso = () => new Date().toISOString();
@@ -112,24 +116,227 @@ log.info("[BOOT] cadence:", {
 });
 const ENABLE_THREADS = (cfg as any).DISCORD_CREATE_THREAD !== false; // default true
 const ADD_REACTIONS = (cfg as any).DISCORD_ADD_REACTIONS !== false; // default true
+const CONCURRENCY = Number(
+  process.env.NEON_CONCURRENCY ?? (cfg as any).CONCURRENCY ?? 4
+);
 
 /* ---------------- state ---------------- */
 const eventDb = new EventDB(cfg.DB_PATH);
 
+/* ---------- tiny concurrency pool (no deps) ---------- */
+async function runWithConcurrency<T>(
+  items: T[],
+  worker: (item: T, idx: number) => Promise<void>,
+  concurrency: number
+) {
+  if (items.length === 0) return;
+  const queue = items.map((v, i) => ({ v, i }));
+  let active = 0;
+  let cursor = 0;
+
+  return new Promise<void>((resolve) => {
+    const launch = () => {
+      if (cursor >= queue.length) {
+        if (active === 0) resolve();
+        return;
+      }
+      const { v, i } = queue[cursor++];
+      active++;
+      Promise.resolve(worker(v, i))
+        .catch((err) => {
+          // already logged inside worker; keep pool going
+          log.error("[WORKER] unhandled error", { idx: i, err });
+        })
+        .finally(() => {
+          active--;
+          launch(); // start next
+        });
+      if (active < concurrency) launch();
+    };
+    const first = Math.min(concurrency, queue.length);
+    for (let k = 0; k < first; k++) launch();
+  });
+}
+
+/* ---------------- single-item pipeline ---------------- */
+async function processItem(item: any) {
+  // ---------- SYMBOL ----------
+  const symbol = item.symbols?.[0];
+  if (!symbol) {
+    log.warn("[NEWS] skip (no symbol)", { title: item.title?.slice(0, 140) });
+    return;
+  }
+
+  // ---------- MARKET CAP ----------
+  const isMarketCapOk = await isMarketCapValid({
+    item,
+    minMarketCap: 0,
+    maxMarketCap: 100_000_000,
+  });
+  if (!isMarketCapOk) {
+    log.info("[NEWS] skip (market cap filter)", {
+      symbol,
+      title: item.title,
+    });
+    return;
+  }
+
+  // ---------- EXCHANGE ----------
+  const ok = await isExchangeOk(symbol);
+  if (!ok) {
+    log.info("[NEWS] skip (exchange check failed)", {
+      symbol,
+      title: item.title,
+    });
+    return;
+  }
+
+  // ---------- CANONICAL ----------
+  const canonicalHeadline = item.title ?? "";
+  const canonicalLink = item.url ?? "";
+  const publishedAt = item.publishedAt ?? null;
+
+  // ---------- DEDUPE ----------
+  const hash = eventDb.makeHash({
+    title: canonicalHeadline,
+    url: canonicalLink,
+    source: item.source,
+  });
+  if (eventDb.seen(hash)) {
+    log.info("[NEWS] dedupe", {
+      symbol,
+      title: canonicalHeadline.slice(0, 120),
+    });
+    return;
+  }
+  eventDb.save(item);
+
+  // ---------- LLM enrichment ----------
+  let estBucket = "n/a";
+  let p50 = "n/a";
+  let p90 = "n/a";
+  let blurb = "";
+  let strengthLabel = "";
+  let confEmoji = "🟡";
+  let conf: "low" | "medium" | "high" = "low";
+  let capStr = "n/a";
+  let pxStr = "n/a";
+  let pros: string[] = [];
+  let cons: string[] = [];
+  let redFlags: string[] = [];
+  let sources: { title: string; url: string }[] = [];
+
+  try {
+    const out = await runLlmCheck(item, {
+      canonical: {
+        headline: canonicalHeadline,
+        url: canonicalLink,
+        publishedAt,
+        wire: item.source ?? null,
+      },
+      maxSources: 6,
+    });
+    log.info(out);
+
+    if (out.est) {
+      estBucket = out.est.expected_move.bucket;
+      p50 = pct(out.est.expected_move.p50);
+      p90 = pct(out.est.expected_move.p90);
+      conf = out.est.confidence as any;
+    }
+    blurb = out.blurb;
+    strengthLabel = out.strengthBucket;
+    confEmoji = out.confidenceEmoji;
+
+    if (out.basics?.marketCapUsd) capStr = humanCapUsd(out.basics.marketCapUsd);
+    if (out.basics?.price != null) pxStr = `$${out.basics.price.toFixed(4)}`;
+
+    pros = out.pros || [];
+    cons = out.cons || [];
+    redFlags = out.red_flags || [];
+    sources = out.sources || [];
+  } catch (e) {
+    log.warn("[LLM] error", e);
+  }
+
+  const color = chooseColor(conf);
+
+  // ---------- Embeds ----------
+  const mainEmbed = {
+    title: `${symbol} — ${canonicalHeadline}`.slice(0, 256),
+    url: canonicalLink || undefined,
+    description: blurb ? `> ${blurb}` : undefined,
+    color,
+    timestamp: publishedAt || nowIso(),
+    author: { name: "NEON·PR — Live Catalyst" },
+    footer: {
+      text: `class=${String(item.klass)} • score=${item.score.toFixed(
+        2
+      )} • ${strengthLabel}`,
+    },
+    fields: [
+      { name: "🎯 Expected Move", value: `\`${estBucket}\``, inline: true },
+      { name: "p50 / p90", value: `\`${p50}\` / \`${p90}\``, inline: true },
+      {
+        name: "Confidence",
+        value: `${confEmoji} ${conf}\n${confidenceMeter(conf)}`,
+        inline: true,
+      },
+      {
+        name: "Basics",
+        value: `cap **${capStr}**  •  px **${pxStr}**`,
+        inline: false,
+      },
+      { name: "Drivers", value: bullets(pros, 6), inline: false },
+      { name: "Caveats", value: bullets(cons, 6), inline: false },
+    ],
+  };
+
+  const riskFields = [];
+  if (redFlags.length)
+    riskFields.push({
+      name: "⚠️ Red Flags",
+      value: bullets(redFlags, 6),
+      inline: false,
+    });
+  if (sources.length)
+    riskFields.push({
+      name: "Sources",
+      value: sourcesLines(sources, 6),
+      inline: false,
+    });
+
+  const extrasEmbed =
+    riskFields.length > 0
+      ? { title: `Risk & Sources — ${symbol}`, color, fields: riskFields }
+      : null;
+
+  const components = linkButtons(symbol, canonicalLink);
+
+  const wantsThread = ENABLE_THREADS;
+  const thread = wantsThread
+    ? {
+        name: threadName(symbol, canonicalHeadline),
+        autoArchiveMinutes: 1440 as 1440,
+      }
+    : undefined;
+  const reactions = ADD_REACTIONS ? ["👀", "📈", "💬"] : undefined;
+
+  await notifyDiscord({
+    content: "",
+    embeds: extrasEmbed ? [mainEmbed, extrasEmbed] : [mainEmbed],
+    components,
+    thread,
+    reactions,
+  });
+}
+
 /* ---------------- core loop ---------------- */
 async function newsCycle() {
   const started = Date.now();
-  log.info("[NEWS] cycle start", { at: new Date(started).toISOString() });
 
   try {
-    const rawItems = await fetchFmpPressReleases({
-      maxPages: 1,
-      minMarketCap: 0,
-      maxMarketCap: 30_000_000,
-      includeUnknownMktCap: true,
-      lookbackMinutes: cfg.NEWS_LOOKBACK_MINUTES ?? 180,
-    });
-
+    const rawItems = await fetchFmpPressReleases({ maxPages: 1 });
     const classified = classify(rawItems);
     const scored = score(classified);
     const passed = scored.filter((it) => it.score >= cfg.ALERT_THRESHOLD);
@@ -137,175 +344,11 @@ async function newsCycle() {
     log.info("[NEWS] fetched", {
       rawCount: rawItems.length,
       passCount: passed.length,
-      lookbackMin: cfg.NEWS_LOOKBACK_MINUTES ?? 180,
+      concurrency: CONCURRENCY,
     });
 
-    for (const item of passed) {
-      const symbol = item.symbols?.[0];
-      if (!symbol) {
-        log.warn("[NEWS] skip (no symbol)", {
-          title: item.title?.slice(0, 140),
-        });
-        continue;
-      }
-
-      const ok = await isExchangeOk(symbol);
-      if (!ok) {
-        log.info("[NEWS] skip (exchange check failed)", {
-          symbol,
-          title: item.title,
-        });
-        continue;
-      }
-
-      // Canonical PR (never replaced)
-      const canonicalHeadline = item.title ?? "";
-      const canonicalLink = item.url ?? "";
-      const publishedAt = item.publishedAt ?? null;
-
-      // Dedupe
-      const hash = eventDb.makeHash({
-        title: canonicalHeadline,
-        url: canonicalLink,
-        source: item.source,
-      });
-      if (eventDb.seen(hash)) {
-        log.info("[NEWS] dedupe", {
-          symbol,
-          title: canonicalHeadline.slice(0, 120),
-        });
-        continue;
-      }
-      eventDb.save(item);
-
-      // ---------- LLM enrichment (context only) ----------
-      let estBucket = "n/a";
-      let p50 = "n/a";
-      let p90 = "n/a";
-      let blurb = "";
-      let strengthLabel = "";
-      let confEmoji = "🟡";
-      let conf: "low" | "medium" | "high" = "low";
-      let capStr = "n/a";
-      let pxStr = "n/a";
-      let pros: string[] = [];
-      let cons: string[] = [];
-      let redFlags: string[] = [];
-      let sources: { title: string; url: string }[] = [];
-
-      try {
-        const out = await runLlmCheck(item, {
-          canonical: {
-            headline: canonicalHeadline,
-            url: canonicalLink,
-            publishedAt,
-            wire: item.source ?? null,
-          },
-          maxSources: 6,
-        });
-
-        if (out.est) {
-          estBucket = out.est.expected_move.bucket;
-          p50 = pct(out.est.expected_move.p50);
-          p90 = pct(out.est.expected_move.p90);
-          conf = out.est.confidence as any;
-        }
-        blurb = out.blurb;
-        strengthLabel = out.strengthBucket;
-        confEmoji = out.confidenceEmoji;
-
-        if (out.basics?.marketCapUsd)
-          capStr = humanCapUsd(out.basics.marketCapUsd);
-        if (out.basics?.price != null)
-          pxStr = `$${out.basics.price.toFixed(4)}`;
-
-        pros = out.pros || [];
-        cons = out.cons || [];
-        redFlags = out.red_flags || [];
-        sources = out.sources || [];
-      } catch (e) {
-        log.warn("[LLM] error", e);
-      }
-
-      // ---------- Build Embeds ----------
-      const color = chooseColor(conf);
-
-      // Embed #1 — main event card
-      const mainEmbed = {
-        title: `${symbol} — ${canonicalHeadline}`.slice(0, 256),
-        url: canonicalLink || undefined,
-        description: blurb ? `> ${blurb}` : undefined,
-        color,
-        timestamp: publishedAt || nowIso(),
-        author: { name: "NEON·PR — Live Catalyst" },
-        footer: {
-          text: `class=${String(item.klass)} • score=${item.score.toFixed(
-            2
-          )} • ${strengthLabel}`,
-        },
-        fields: [
-          { name: "🎯 Expected Move", value: `\`${estBucket}\``, inline: true },
-          { name: "p50 / p90", value: `\`${p50}\` / \`${p90}\``, inline: true },
-          {
-            name: "Confidence",
-            value: `${confEmoji} ${conf}\n${confidenceMeter(conf)}`,
-            inline: true,
-          },
-          {
-            name: "Basics",
-            value: `cap **${capStr}**  •  px **${pxStr}**`,
-            inline: false,
-          },
-          { name: "Drivers", value: bullets(pros, 6), inline: false },
-          { name: "Caveats", value: bullets(cons, 6), inline: false },
-        ],
-      };
-
-      // Embed #2 — risk & sources (only if we actually have content)
-      const riskFields = [];
-      if (redFlags.length)
-        riskFields.push({
-          name: "⚠️ Red Flags",
-          value: bullets(redFlags, 6),
-          inline: false,
-        });
-      if (sources.length)
-        riskFields.push({
-          name: "Sources",
-          value: sourcesLines(sources, 6),
-          inline: false,
-        });
-
-      const extrasEmbed = riskFields.length
-        ? {
-            title: `Risk & Sources — ${symbol}`,
-            color,
-            fields: riskFields,
-          }
-        : null;
-
-      // ---------- Buttons ----------
-      const components = linkButtons(symbol, canonicalLink);
-
-      // ---------- Send: embed(s) + buttons + optional thread + reactions ----------
-      const wantsThread = ENABLE_THREADS;
-      const thread = wantsThread
-        ? {
-            name: threadName(symbol, canonicalHeadline),
-            autoArchiveMinutes: 1440 as 1440,
-          }
-        : undefined;
-
-      const reactions = ADD_REACTIONS ? ["👀", "📈", "💬"] : undefined;
-
-      await notifyDiscord({
-        content: "", // keep clean; title links to the PR
-        embeds: extrasEmbed ? [mainEmbed, extrasEmbed] : [mainEmbed],
-        components,
-        thread,
-        reactions,
-      });
-    }
+    // ⬇️ run all items concurrently with a safe cap
+    await runWithConcurrency(passed, processItem, CONCURRENCY);
   } catch (err) {
     log.error("newsCycle error:", err);
   } finally {
