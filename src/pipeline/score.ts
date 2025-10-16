@@ -3,32 +3,33 @@ import type { ClassifiedItem } from "../types.js";
 
 /** Baseline impact by classified event (higher = more likely to cause large pops). */
 const BASELINE: Record<string, number> = {
-  // --- existing ---
-  PIVOTAL_TRIAL_SUCCESS: 0.72,
-  FDA_MARKETING_AUTH: 0.7,
-  FDA_ADCOM_POSITIVE: 0.66,
+  // Core
+  PIVOTAL_TRIAL_SUCCESS: 0.74,
+  FDA_MARKETING_AUTH: 0.72,
+  FDA_ADCOM_POSITIVE: 0.68,
   REGULATORY_DESIGNATION: 0.54,
-  TIER1_PARTNERSHIP: 0.6,
-  MAJOR_GOV_CONTRACT: 0.6,
-  GOVERNMENT_EQUITY_OR_GRANT: 0.58,
-  ACQUISITION_BUYOUT: 0.64,
-  IPO_DEBUT_POP: 0.55,
+  TIER1_PARTNERSHIP: 0.62,
+  MAJOR_GOV_CONTRACT: 0.62,
+  GOVERNMENT_EQUITY_OR_GRANT: 0.61,
+  ACQUISITION_BUYOUT: 0.66,
+  IPO_DEBUT_POP: 0.56,
   COURT_WIN_INJUNCTION: 0.56,
   MEME_OR_INFLUENCER: 0.5,
-  RESTRUCTURING_OR_FINANCING: 0.5,
+  // ⭐ OTC-weighted: financing/build/production deserve more than generic earnings
+  RESTRUCTURING_OR_FINANCING: 0.6,
   POLICY_OR_POLITICS_TAILWIND: 0.44,
   EARNINGS_BEAT_OR_GUIDE_UP: 0.52,
   INDEX_INCLUSION: 0.5,
-  UPLISTING_TO_NASDAQ: 0.46,
+  UPLISTING_TO_NASDAQ: 0.48,
 
-  // micro/OTC labels
+  // Micro/OTC labels
   REVERSE_SPLIT_UPLIST_PATH: 0.58,
   CE_REMOVAL_OR_RESUME_TRADING: 0.67,
   GOING_CONCERN_REMOVED: 0.56,
   INSIDER_BUY_CLUSTER: 0.6,
-  TOXIC_FINANCING_TERMINATED: 0.62,
-  AUTHORIZED_SHARES_REDUCED: 0.54,
-  DILUTION_FREE_INVESTMENT: 0.58,
+  TOXIC_FINANCING_TERMINATED: 0.64,
+  AUTHORIZED_SHARES_REDUCED: 0.56,
+  DILUTION_FREE_INVESTMENT: 0.6,
   LARGE_ORDER_RELATIVE: 0.57,
   DISTRIBUTION_AGREEMENT_MATERIAL: 0.6,
   CRYPTO_OR_AI_TREASURY_PIVOT: 0.55,
@@ -109,10 +110,7 @@ const RX_MID_STAGE_WIN =
 const RX_TOPLINE_STRONG =
   /\b(top-?line|primary endpoint (met|achieved)|statistically significant|p<\s*0?\.\d+)\b/i;
 
-/** Regulatory process (kept as-is in your version) */
-// ... (unchanged omitted for brevity)
-
-/** M&A — add announce variant */
+/** M&A — definitive + announce handling */
 const RX_MNA_DEFINITIVE =
   /\b(definitive (merger|agreement|deal)|merger agreement (executed|signed)|enter(?:s|ed)? into (a )?definitive (agreement|merger)|business combination( agreement)?|amalgamation agreement|plan of merger)\b/i;
 const RX_MNA_WILL_ACQUIRE = /\b(will|to)\s+acquire\b|\bto be acquired\b/i;
@@ -127,14 +125,33 @@ const RX_ASSET_SALE_TITLELIKE =
   /\b((completes?|closes?)\s+(the\s+)?(sale|disposition)\s+of|sale\s+of\s+(subsidiary|business|unit|division|assets?))\b/i;
 const RX_PROPERTY_ACQ =
   /\b(acquires?|acquisition of)\b.*\b(property|properties|facility|facilities|building|real estate|inpatient rehabilitation)\b/i;
-// NEW:
 const RX_MNA_ANNOUNCE =
   /\b(announce[sd]?|completes?|completed|closes?|closed)\b[^.]{0,40}\b(acquisition|acquire[sd]?|merger)\b/i;
 
-/** Financing / crypto / policy / index / micro rules … (unchanged parts retained) */
-// ... keep everything from your current file
+/** ⭐ OTC Mining/Resources: transformational financing & build/ops */
+const RX_FULLY_FUNDED =
+  /\b(fully[-\s]?fund(?:ed|s|ing)|funds?\s+(?:the\s+)?capex)\b/i;
+const RX_PROJECT_FINANCE =
+  /\b(secures?|obtains?|arranges?|closes?|executes?|signs?)\b[^.]{0,60}\b(gold loan|loan|credit facility|project financing|project finance|debt financing|term loan|royalty(?:\s+financing)?|stream(?:ing)? (?:deal|agreement)|non[- ]dilutive (?:financing|funding))\b/i;
+const RX_CONSTRUCTION_DECISION =
+  /\b(board of directors )?approv(?:es|ed)\b[^.]{0,80}\b(construction|final investment decision|FID|go[- ]ahead|build)\b/i;
+const RX_PRODUCTION_START =
+  /\b(commenc(?:es|ed|ing)|begin(?:s|ning)|starts?|started)\b[^.]{0,80}\b(production|processing|mining|operations?|heap[- ]?leach)\b/i;
+const RX_PERMIT_APPROVAL =
+  /\b(permit|licen[cs]e|environmental|concession)\b[^.]{0,60}\b(approved|granted|received|obtained|issued)\b/i;
+const RX_ROYALTY_STREAM =
+  /\b(royalty|stream(?:ing)?)\b[^.]{0,60}\b(agreement|financing|facility|transaction|deal)\b/i;
+const RX_OFFTAKE =
+  /\b(off[- ]?take|offtake)\b[^.]{0,40}\b(agreement|contract|MOU|memorandum)\b/i;
+const RX_NON_DILUTIVE =
+  /\b(non[- ]dilutive|no (?:warrants?|reverse split)|without (?:warrants|a reverse split))\b/i;
 
-/** Dollar extraction + micro materiality (unchanged) */
+/** Dilutive financing (suppression unless clear positives present) */
+const RX_PLAIN_DILUTIVE =
+  /\b(securities purchase agreement|SPA|registered direct|PIPE|private placement|warrants?|convertible (notes?|debentures?|securities?)|ATM|at[- ]the[- ]market|equity (offering|raise)|unit (offering|financing)|pricing of (an )?offering)\b/i;
+const RX_DILUTION_POSITIVE = /\b(premium|above[- ]market|priced at)\b.*\$\d/i;
+
+/** Dollar extraction + materiality */
 function extractDollarsMillions(x: string): number | null {
   const mm = x.match(
     /\$?\s?(\d{1,3}(?:\.\d+)?)\s*(million|billion|bn|mm|m|b)\b/i
@@ -145,7 +162,7 @@ function extractDollarsMillions(x: string): number | null {
     if (unit === "b" || unit === "billion" || unit === "bn") return val * 1000;
     return val;
   }
-  const raw = x.match(/\$\s?(\d{6,9})(?!\.)\b/);
+  const raw = x.match(/\$\s?(\d{6,12})(?!\.)\b/);
   if (raw) return parseInt(raw[1], 10) / 1_000_000;
   return null;
 }
@@ -165,7 +182,8 @@ function microMaterialityBoost(
   let relBoost = 0;
   if (mc && mc > 0) {
     const ratio = amt / mc;
-    if (ratio >= 0.25) relBoost += 0.08;
+    if (ratio >= 0.5) relBoost += 0.12;
+    else if (ratio >= 0.25) relBoost += 0.08;
     else if (ratio >= 0.1) relBoost += 0.05;
     else if (ratio >= 0.05) relBoost += 0.03;
   }
@@ -174,11 +192,13 @@ function microMaterialityBoost(
 
 export function score(items: ClassifiedItem[]): ClassifiedItem[] {
   return items.map((it) => {
-    const blob = `${it.title ?? ""} ${it.summary ?? ""}`;
+    const blob = `${it.title ?? ""} ${
+      (it as any).summary ?? (it as any).text ?? ""
+    }`;
     const label = String(it.klass);
     const isWire = isWirePR((it as any).url, blob);
 
-    // 0) Misinformation kill
+    // 0) Kill switch: misinformation
     if (
       /\b(misinformation|unauthorized (press )?release|retracts? (?:a )?press release|clarif(?:y|ies) misinformation)\b/i.test(
         blob
@@ -186,10 +206,10 @@ export function score(items: ClassifiedItem[]): ClassifiedItem[] {
     )
       return { ...it, score: 0 };
 
-    // 1) Baseline
+    // 1) Baseline by label
     let s = BASELINE[label] ?? BASELINE.OTHER;
 
-    // 2) Early caps (unchanged from your file) …
+    // 2) Noise caps
     if (RX_PROXY_ADVISOR.test(blob) || RX_VOTE_ADMIN_ONLY.test(blob))
       s = Math.min(s, 0.2);
     if (RX_LAWFIRM.test(blob)) s = Math.min(s, 0.12);
@@ -227,6 +247,7 @@ export function score(items: ClassifiedItem[]): ClassifiedItem[] {
     )
       s = Math.min(s, 0.2);
 
+    // Strategic alternatives (until outcome)
     if (
       /\b(strategic alternatives?|exploring (alternatives|options)|review of strategic alternatives|considering strategic alternatives)\b/i.test(
         blob
@@ -236,30 +257,30 @@ export function score(items: ClassifiedItem[]): ClassifiedItem[] {
 
     // 3) Dilutive financing suppression (unless positives)
     const isPlainDilutive =
-      /\b(securities purchase agreement|SPA|registered direct|PIPE|private placement|warrants?|convertible (notes?|debentures?|securities?)|ATM|at[- ]the[- ]market|equity (offering|raise)|unit (offering|financing)|pricing of (an )?offering)\b/i.test(
-        blob
-      ) &&
+      RX_PLAIN_DILUTIVE.test(blob) &&
       !(
-        /\b(premium|above[- ]market|priced at)\b.*\$\d/i.test(blob) ||
-        /\b(strategic (investment|investor|partner|partnership|financing))\b/i.test(
-          blob
-        ) ||
+        RX_DILUTION_POSITIVE.test(blob) ||
+        RX_NON_DILUTIVE.test(blob) ||
         /\b(going[- ]concern (removed|resolved)|debt (extinguished|retired|repaid|eliminated|paid (down|off))|default (cured|resolved))\b/i.test(
           blob
         )
       );
     if (isPlainDilutive) s = Math.min(s, 0.18);
 
-    // 4–6) Bio nuance, approvals, process guards … (keep your existing logic)
+    // 4) Bio nuance: real topline/pivotal gets extra
+    if (label === "PIVOTAL_TRIAL_SUCCESS") {
+      if (RX_PIVOTAL.test(blob) && RX_TOPLINE_STRONG.test(blob)) s += 0.06;
+      else if (RX_MID_STAGE_WIN.test(blob)) s += 0.03;
+    }
 
-    // 7) M&A specifics + NEW announce handling
+    // 5) M&A specifics + announce handling
     if (label === "ACQUISITION_BUYOUT") {
       const definitive =
         RX_MNA_DEFINITIVE.test(blob) ||
         (RX_MNA_WILL_ACQUIRE.test(blob) && RX_MNA_PERPRICE.test(blob));
       if (definitive) s += 0.06;
       if (RX_MNA_PERPRICE.test(blob)) s += 0.02;
-      if (RX_MNA_ANNOUNCE.test(blob)) s += 0.04; // <— announced/closed
+      if (RX_MNA_ANNOUNCE.test(blob)) s += 0.04; // announced/closed headlines move OTC
       if (RX_MNA_LOI_ANY.test(blob)) s -= 0.06;
       if (RX_MNA_ADMIN.test(blob)) s = Math.min(s, 0.4);
       if (
@@ -270,7 +291,27 @@ export function score(items: ClassifiedItem[]): ClassifiedItem[] {
         s = Math.min(s, 0.4);
     }
 
-    // 10) Wire presence modulation — relax for microcap M&A announces
+    // 6) ⭐ OTC Mining/Resources — transformational finance/build/ops
+    if (label === "RESTRUCTURING_OR_FINANCING") {
+      let tfBoost = 0;
+      if (RX_PROJECT_FINANCE.test(blob)) tfBoost += 0.1; // project finance / credit facility / debt
+      if (RX_FULLY_FUNDED.test(blob)) tfBoost += 0.06; // “fully fund(s) capex”
+      if (RX_CONSTRUCTION_DECISION.test(blob)) tfBoost += 0.06;
+      if (RX_ROYALTY_STREAM.test(blob)) tfBoost += 0.06;
+      if (RX_OFFTAKE.test(blob)) tfBoost += 0.04;
+      if (RX_PERMIT_APPROVAL.test(blob)) tfBoost += 0.05;
+      if (RX_PRODUCTION_START.test(blob)) tfBoost += 0.06;
+      // synergy: finance + construction decision together gets an extra nudge
+      if (RX_PROJECT_FINANCE.test(blob) && RX_CONSTRUCTION_DECISION.test(blob))
+        tfBoost += 0.02;
+      tfBoost = Math.min(0.2, tfBoost);
+      s += tfBoost;
+
+      // Non-dilutive language + wire → good signal
+      if (isWire && RX_NON_DILUTIVE.test(blob)) s += 0.03;
+    }
+
+    // 7) Wire presence modulation
     const wireSensitive =
       label === "PIVOTAL_TRIAL_SUCCESS" ||
       label === "FDA_MARKETING_AUTH" ||
@@ -286,18 +327,23 @@ export function score(items: ClassifiedItem[]): ClassifiedItem[] {
     if (wireSensitive) {
       const mc = mcMillions(it) ?? Infinity;
       const isMicro = mc < 50; // relax for sub-$50M caps
-      const isAnnounceMna = RX_MNA_ANNOUNCE.test(blob);
       const allowOffWire =
-        label === "ACQUISITION_BUYOUT" && isMicro && isAnnounceMna;
+        label === "ACQUISITION_BUYOUT" && isMicro && RX_MNA_ANNOUNCE.test(blob);
 
       if (isWire) s += 0.04;
       else if (!allowOffWire) s = Math.min(s, 0.48);
+    } else {
+      // Non-wire-sensitive labels still get a small wire nudge
+      if (isWire) s += 0.02;
     }
 
-    // Keep the rest of your scoring logic (reimbursement, index major/minor, crypto-treasury boosts, micro/OTC boosters, size bumps, caps/bounds) exactly as-is
-    // ---- Existing logic continues ----
+    // 8) Materiality vs market cap (works great for OTC)
+    const { material, major, relBoost } = microMaterialityBoost(blob, it);
+    s += relBoost;
+    if (material) s += 0.02;
+    if (major) s += 0.03;
 
-    // Generic size-sensitive bump
+    // 9) Generic size-sensitive bump (OTC pop potential)
     const mc = mcMillions(it);
     const isSub100M = !!mc && mc < 100;
     const isSub25M = !!mc && mc < 25;
@@ -311,10 +357,19 @@ export function score(items: ClassifiedItem[]): ClassifiedItem[] {
       if (isSmallCap) s += 0.14;
     }
 
+    // 10) Textual nudges
     if (SUPERLATIVE_WORDS.test(blob)) s += 0.04;
     if (LARGE_DOLLAR_AMOUNT.test(blob)) s += 0.06;
     if (BIG_MOVE_WORDS.test(blob)) s += 0.06;
     if ((it.symbols?.length || 0) === 1) s += 0.03;
+
+    // 11) Earnings guardrails: require beat/raise or strong KPIs
+    if (label === "EARNINGS_BEAT_OR_GUIDE_UP") {
+      if (!RX_EARNINGS_BEAT.test(blob) && !RX_FIN_RESULTS.test(blob)) {
+        // if misclassified earnings without beats/raise, cap it
+        s = Math.min(s, 0.4);
+      }
+    }
 
     // Bound [0,1]
     s = Math.max(0, Math.min(1, s));

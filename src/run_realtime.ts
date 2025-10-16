@@ -120,6 +120,9 @@ const CONCURRENCY = Number(
   process.env.NEON_CONCURRENCY ?? (cfg as any).CONCURRENCY ?? 4
 );
 
+// Alert only if expected move >= this percent (uses max(p50, p90) from llmCheck)
+const MOVE_ALERT_THRESHOLD_PCT = 40;
+
 /* ---------------- state ---------------- */
 const eventDb = new EventDB(cfg.DB_PATH);
 
@@ -215,6 +218,8 @@ async function processItem(item: any) {
   let estBucket = "n/a";
   let p50 = "n/a";
   let p90 = "n/a";
+  let p50Num = 0; // numeric capture for gating
+  let p90Num = 0; // numeric capture for gating
   let blurb = "";
   let strengthLabel = "";
   let confEmoji = "🟡";
@@ -240,8 +245,10 @@ async function processItem(item: any) {
 
     if (out.est) {
       estBucket = out.est.expected_move.bucket;
-      p50 = pct(out.est.expected_move.p50);
-      p90 = pct(out.est.expected_move.p90);
+      p50Num = Number(out.est.expected_move.p50 || 0);
+      p90Num = Number(out.est.expected_move.p90 || 0);
+      p50 = pct(p50Num);
+      p90 = pct(p90Num);
       conf = out.est.confidence as any;
     }
     blurb = out.blurb;
@@ -257,6 +264,22 @@ async function processItem(item: any) {
     sources = out.sources || [];
   } catch (e) {
     log.warn("[LLM] error", e);
+  }
+
+  // ---------- ALERT GATE: require >= threshold move ----------
+  const moveMax = Math.max(
+    Number.isFinite(p50Num) ? p50Num : 0,
+    Number.isFinite(p90Num) ? p90Num : 0
+  );
+  if (moveMax < MOVE_ALERT_THRESHOLD_PCT) {
+    log.info("[NEWS] skip (expected move below threshold)", {
+      symbol,
+      p50: p50Num,
+      p90: p90Num,
+      threshold: MOVE_ALERT_THRESHOLD_PCT,
+      bucket: estBucket,
+    });
+    return; // do not send Discord message
   }
 
   const color = chooseColor(conf);

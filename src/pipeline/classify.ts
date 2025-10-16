@@ -271,7 +271,7 @@ const extractDollars = (x: string): number | null => {
     if (["b", "billion", "bn"].includes(unit)) return val * 1000;
     return val; // already in millions
   }
-  const plain = x.match(/\$\s?(\d{6,9})(?!\.)\b/); // raw dollars
+  const plain = x.match(/\$\s?(\d{6,12})(?!\.)\b/); // raw dollars
   if (plain) {
     const n = parseInt(plain[1], 10);
     return n / 1_000_000;
@@ -279,7 +279,7 @@ const extractDollars = (x: string): number | null => {
   return null;
 };
 
-// For micro caps, smaller checks matter: treat >=$1–3M as material, >=$5–10M as major.
+// For micro caps, smaller checks matter: treat >=$1–3M as material, >=$7.5–10M as major.
 const isMaterialMicroDollar = (
   x: string
 ): { material: boolean; major: boolean } => {
@@ -316,7 +316,7 @@ const PAT = {
   mnaAnnounce:
     /\b(announce[sd]?|completes?|completed|closes?|closed)\b[^.]{0,40}\b(acquisition|acquire[sd]?|merger)\b/i,
 
-  // Awards PR (add a basic pattern, adjust as needed)
+  // Awards PR
   awardsPR: /\b(award(?:ed)?|honor(?:ed)?|recognition|prize|winner|winning)\b/i,
 
   strategicAltsOutcome:
@@ -352,9 +352,9 @@ const PAT = {
 
   // Partnerships / contracts / gov
   partnershipAny:
-    /\b(partner(?:ship)?|strategic (?:alliance|partnership)|joint venture|JV|collaborat(?:e|ion)|co[- ]develop|co[- ]produce|distribution|licen[cs]e|supply|integration|deployment)\b/i,
+    /\b(partner(?:ship)?|strategic (?:alliance|partnership)|joint venture|JV|collaborat(?:e|ion)|co[- ]develop|co[- ]produce|distribution|licen[cs]e|supply|integration|deployment|offtake|off[- ]?take)\b/i, // ⭐ NEW: offtake key
   dealSigned:
-    /\b(signed|signs|inks?|enter(?:s|ed)? into)\b.*\b(agreement|deal|contract|MOU|memorandum of understanding)\b/i,
+    /\b(signed|signs|inks?|enter(?:s|ed)? into)\b.*\b(agreement|deal|contract|MOU|memorandum of understanding|term sheet)\b/i,
   contractAny:
     /\b(contract|award|task order|IDIQ|grant|funding|purchase order|PO|framework agreement|letter of award|LOA)\b/i,
   preferredVendor: /\b(preferred (vendor|supplier|partner)|approved vendor)\b/i,
@@ -487,6 +487,26 @@ const PAT = {
     /\b(AI|artificial intelligence|LLM|GPT)\b.*\b(pivot|strategy|initiative|platform|integration|launch(?:es|ed)?)\b/i,
   cryptoPivot:
     /\b(Bitcoin|BTC|crypto|Web3|blockchain|Ethereum|ETH|Solana|SOL)\b.*\b(treasury|pivot|strategy|mining|hashrate|node|validator|reserve)\b/i,
+
+  /* ⭐ NEW: Mining/OTC transformational financing & build */
+  projectFinance:
+    /\b(secures?|obtains?|arranges?|closes?|executes?|signs?)\b[^.]{0,60}\b(gold loan|loan|credit facility|project financing|project finance|debt financing|term loan|royalty(?:\s+financing)?|stream(?:ing)? (?:deal|agreement)|non[- ]dilutive (?:financing|funding))\b[^.]{0,120}\b(fully\s*fund|fund(?:ing)?|capex|capital (?:cost|expenditure)|construction|starter (?:operation|project)|heap[- ]?leach|mine (?:build|construction))\b/i,
+  /* ⭐ NEW: Construction decision / FID / go-ahead */
+  constructionDecision:
+    /\b(board of directors )?approv(?:es|ed)\b[^.]{0,80}\b(construction|final investment decision|FID|go[- ]ahead|build)\b/i,
+  /* ⭐ NEW: Commencement of production/operations */
+  productionStart:
+    /\b(commenc(?:es|ed|ing)|begin(?:s|ning)|starts?|started)\b[^.]{0,80}\b(production|processing|mining|operations?|heap[- ]?leach)\b/i,
+  /* ⭐ NEW: Permitting / license milestones */
+  permitGrant:
+    /\b(permit|licen[cs]e|environmental|IBAMA|IBAMA\/SEMAS|EIA|EIS|concession)\b[^.]{0,60}\b(approved|granted|received|obtained|issued)\b/i,
+  /* ⭐ NEW: Royalty/stream standalone (often funding) */
+  royaltyStream:
+    /\b(royalty|stream(?:ing)?)\b[^.]{0,60}\b(agreement|financing|facility|transaction|deal)\b/i,
+  /* ⭐ NEW: Feasibility economics (signal for mining) */
+  feasStudy:
+    /\b(pre[- ]?feasibility|feasibility (?:study)?|PFS|DFS)\b[^.]{0,60}\b(released|updated|results?|positive|economics?)\b/i,
+  econBuzz: /\b(NPV|IRR|payback|all[- ]in sustaining cost|AISC)\b/i,
 };
 
 /** Micro-cap dollar/scale helpers */
@@ -498,7 +518,8 @@ type ScoreHit = { label: HighImpactEvent; w: number; why: string };
 
 function classifyOne(it: RawItem): { event: HighImpactEvent; score: number } {
   const title = normalize(it.title || "");
-  const body = normalize(it.summary || "");
+  // ⭐ include .text too (some feeds omit summary)
+  const body = normalize((it as any).summary || (it as any).text || "");
   const x = `${title}\n${body}`;
   const url = (it as any).url as string | undefined;
 
@@ -565,38 +586,32 @@ function classifyOne(it: RawItem): { event: HighImpactEvent; score: number } {
   );
   push(PAT.clinicalHoldLift.test(x), "PIVOTAL_TRIAL_SUCCESS", 6, "hold_lift");
 
-  // *** NEW: M&A announce — capture “Announces Acquisition of …” ***
+  // M&A (incl. announce phrasing)
   {
     const binding =
       PAT.mnaBinding.test(x) ||
       (PAT.mnaWillAcquire.test(x) && PAT.mnaPerShareOrValue.test(x));
-    const announce = PAT.mnaAnnounce.test(x); // <— catches WNRS phrasing
+    const announce = PAT.mnaAnnounce.test(x);
     const nonbind = PAT.mnaNonBinding.test(x);
     const admin = PAT.mnaAdminOnly.test(x);
-    const asset = PAT.mnaAssetOrProperty.test(x); // avoid asset/property noise
+    const asset = PAT.mnaAssetOrProperty.test(x);
     const unsolicited = PAT.mnaUnsolicitedProposal.test(x);
     const hasPremium = PAT.mnaPremiumMention.test(x);
 
-    // Definitive/priced → strong
     push(
       binding && !nonbind && !admin && !asset,
       "ACQUISITION_BUYOUT",
       9,
       "mna_binding"
     );
-
-    // Announced/closed acquisitions (unpriced/off-wire microcaps still move)
     push(announce && !asset, "ACQUISITION_BUYOUT", 7, "mna_announce");
-
     push(
       unsolicited && !admin && !asset,
       "ACQUISITION_BUYOUT",
       6,
       "mna_unsolicited_priced"
     );
-
     if (nonbind || admin || asset) push(true, "OTHER", 2, "mna_low_impact");
-
     push(
       PAT.strategicAltsOutcome?.test?.(x) || false,
       "ACQUISITION_BUYOUT",
@@ -791,6 +806,69 @@ function classifyOne(it: RawItem): { event: HighImpactEvent; score: number } {
     )
   )
     push(true, "CRYPTO_OR_AI_TREASURY_PIVOT", 6, "ai_pivot_action");
+
+  // ⭐ NEW: Feasibility & economics (supporting boost for miners)
+  if (PAT.feasStudy.test(x) && PAT.econBuzz.test(x)) {
+    const dollars = isMaterialMicroDollar(x);
+    push(
+      true,
+      "RESTRUCTURING_OR_FINANCING",
+      5 + (dollars.material ? 1 : 0),
+      "feas_economics"
+    );
+  }
+
+  // ⭐ NEW: Royalty/stream standalone
+  if (PAT.royaltyStream.test(x)) {
+    const dollars = isMaterialMicroDollar(x);
+    push(
+      true,
+      "RESTRUCTURING_OR_FINANCING",
+      6 + (dollars.major ? 2 : dollars.material ? 1 : 0),
+      "royalty_stream_funding"
+    );
+  }
+
+  // ⭐ NEW: Project finance / construction / production / permits
+  if (
+    PAT.projectFinance.test(x) ||
+    PAT.constructionDecision.test(x) ||
+    PAT.productionStart.test(x) ||
+    PAT.permitGrant.test(x)
+  ) {
+    const dollars = isMaterialMicroDollar(x);
+    let w = 7 + (isPR ? 1 : 0) + (dollars.major ? 2 : dollars.material ? 1 : 0);
+    if (PAT.projectFinance.test(x) && PAT.constructionDecision.test(x)) w += 1; // synergy
+    if (PAT.productionStart.test(x)) w += 1; // production tends to pop
+    w = Math.min(9, w);
+    push(
+      true,
+      "RESTRUCTURING_OR_FINANCING",
+      w,
+      "project_finance_build_ops_permit"
+    );
+  }
+
+  /* 🛟 SAFEGUARD: Great-PR heuristic so real wire PRs don’t fall to OTHER
+     If it's a real wire PR, mentions big $, and uses strong action words,
+     ensure we classify as a catalyst rather than OTHER. */
+  if (hits.length === 0 && isPR) {
+    const dollars = isMaterialMicroDollar(x);
+    const strongAction =
+      /\b(definitive|binding|execut(?:e|ed|ion)|close[sd]?|commenc(?:e|ed|ing)|approved|granted|awarded|contract|agreement|loan|facility|financing|offtake|royalty|stream)\b/i.test(
+        x
+      );
+    if ((dollars.material || /fully\s*fund/i.test(x)) && strongAction) {
+      // Default to restructuring/financing with moderate strength
+      const base = 6 + (dollars.major ? 2 : dollars.material ? 1 : 0);
+      push(
+        true,
+        "RESTRUCTURING_OR_FINANCING",
+        Math.min(8, base),
+        "safeguard_wire_material"
+      );
+    }
+  }
 
   if (!hits.length) return { event: "OTHER", score: 0 };
 
