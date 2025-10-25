@@ -32,17 +32,42 @@ function bullets(arr?: string[], max = 6) {
     .map((s) => `• ${s}`)
     .join("\n");
 }
-function sourcesLines(srcs?: { title: string; url: string }[], max = 6) {
+function shortDate(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(+d)
+    ? ""
+    : `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(
+        2,
+        "0"
+      )}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+function sourcesLines(
+  srcs?: {
+    title: string;
+    url: string;
+    publisher?: string;
+    publishedISO?: string;
+  }[],
+  max = 6
+) {
   if (!srcs?.length) return "• _none_";
   return srcs
     .slice(0, max)
-    .map((s) => `• [${s.title.slice(0, 80)}](${s.url})`)
+    .map((s) => {
+      const label = s.title ? s.title.slice(0, 90) : s.url;
+      const metaParts = [];
+      if (s.publisher) metaParts.push(s.publisher);
+      const d = shortDate(s.publishedISO);
+      if (d) metaParts.push(d);
+      const meta = metaParts.length ? ` — _${metaParts.join(" · ")}_` : "";
+      return `• [${label}](${s.url})${meta}`;
+    })
     .join("\n");
 }
-function confidenceMeter(conf: "low" | "medium" | "high") {
-  const v = conf === "high" ? 0.9 : conf === "medium" ? 0.6 : 0.3;
-  const width = 14,
-    filled = Math.round(clamp01(v) * width);
+function meter01(x: number, width = 14) {
+  const v = clamp01(x);
+  const filled = Math.round(v * width);
   return (
     "`" +
     "█".repeat(filled) +
@@ -52,16 +77,139 @@ function confidenceMeter(conf: "low" | "medium" | "high") {
     "%"
   );
 }
-function chooseColor(conf: "low" | "medium" | "high") {
-  return conf === "high" ? 0x23d18b : conf === "medium" ? 0xffa657 : 0x738adb;
+function confidenceMeter(conf: "low" | "medium" | "high") {
+  const v = conf === "high" ? 0.9 : conf === "medium" ? 0.6 : 0.3;
+  return meter01(v);
 }
-function threadName(symbol: string, headline: string) {
-  const base = `${symbol} — ${headline}`;
+function chooseColorByDecision(
+  decision: "YES" | "SPECULATIVE" | "PASS",
+  belowThreshold: boolean
+) {
+  if (decision === "YES") return 0x23d18b; // green
+  if (decision === "SPECULATIVE") return 0xffa657; // orange
+  return belowThreshold ? 0x666a70 : 0x738adb; // muted gray or blurple
+}
+function boolEmoji(b?: boolean) {
+  return b ? "✅" : "❌";
+}
+function threadName(
+  symbol: string,
+  headline: string,
+  invest: string,
+  p90?: number
+) {
+  const p90txt = Number.isFinite(p90 as number)
+    ? ` · p90~${Math.round(p90 as number)}%`
+    : "";
+  const base = `${symbol} — ${headline}${p90txt} · ${invest}`;
   return base.length <= 95 ? base : base.slice(0, 94) + "…";
 }
-function linkButtons(symbol: string, prUrl?: string) {
-  const buttons = [];
-  if (prUrl)
+function hostname(url?: string) {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+const WIRE_HOSTS = new Set([
+  "www.prnewswire.com",
+  "www.globenewswire.com",
+  "www.businesswire.com",
+  "www.accesswire.com",
+  "www.newsfilecorp.com",
+  "prismmediawire.com",
+  "www.prismmediawire.com",
+  "mcapmediawire.com",
+  "www.mcapmediawire.com",
+]);
+function isIRHost(h?: string) {
+  return (
+    !!h &&
+    (/^ir\./i.test(h) || /^investors?\./i.test(h) || /^newsroom\./i.test(h))
+  );
+}
+function isGovOrFilingHost(h?: string) {
+  return (
+    !!h &&
+    (/(\.|^)sec\.gov$/i.test(h) ||
+      /sedar/i.test(h) ||
+      /(\.|^)gov$/i.test(h) ||
+      /(\.|^)sam\.gov$/i.test(h) ||
+      /(\.|^)usaspending\.gov$/i.test(h) ||
+      /(\.|^)canada\.ca$/i.test(h) ||
+      /(\.|^)europa\.eu$/i.test(h))
+  );
+}
+function isWireHost(h?: string) {
+  return !!h && WIRE_HOSTS.has(h);
+}
+function splitSources(
+  symbol: string,
+  prUrl: string | undefined,
+  srcs?: {
+    title: string;
+    url: string;
+    publisher?: string;
+    publishedISO?: string;
+  }[]
+) {
+  const out = {
+    wireOrIR: [] as typeof srcs,
+    govOrFiling: [] as typeof srcs,
+    counterparty: [] as typeof srcs,
+    other: [] as typeof srcs,
+  };
+  if (!srcs?.length) return out;
+  const companyHost = hostname(prUrl);
+  for (const s of srcs) {
+    const h = hostname(s.url);
+    if (isWireHost(h) || isIRHost(h) || (companyHost && h === companyHost)) {
+      (out.wireOrIR as any).push(s);
+    } else if (isGovOrFilingHost(h)) {
+      (out.govOrFiling as any).push(s);
+    } else {
+      (out.counterparty as any).push(s);
+    }
+  }
+  return out;
+}
+function pickFirst<T>(xs?: T[]) {
+  return xs && xs.length ? xs[0] : undefined;
+}
+function linkButtonsEnhanced(
+  symbol: string,
+  prUrl?: string,
+  sources?: {
+    title: string;
+    url: string;
+    publisher?: string;
+    publishedISO?: string;
+  }[]
+) {
+  const comps: any[] = [];
+  const { wireOrIR, govOrFiling, counterparty } = splitSources(
+    symbol,
+    prUrl,
+    sources
+  );
+
+  const irOrWire = pickFirst(wireOrIR);
+  const filing = pickFirst(govOrFiling);
+  const cp = pickFirst(counterparty);
+
+  const buttons: any[] = [];
+  if (irOrWire?.url) {
+    buttons.push({
+      type: 2 as const,
+      style: 5 as const,
+      label: irOrWire.publisher
+        ? `PR/IR: ${irOrWire.publisher.slice(0, 20)}`
+        : "Open PR / IR",
+      url: irOrWire.url,
+      emoji: { name: "📰" },
+    });
+  } else if (prUrl) {
     buttons.push({
       type: 2 as const,
       style: 5 as const,
@@ -69,6 +217,28 @@ function linkButtons(symbol: string, prUrl?: string) {
       url: prUrl,
       emoji: { name: "📰" },
     });
+  }
+
+  if (filing?.url) {
+    buttons.push({
+      type: 2 as const,
+      style: 5 as const,
+      label: "SEC/Gov Source",
+      url: filing.url,
+      emoji: { name: "📄" },
+    });
+  }
+  if (cp?.url) {
+    buttons.push({
+      type: 2 as const,
+      style: 5 as const,
+      label: "Counterparty Newsroom",
+      url: cp.url,
+      emoji: { name: "🤝" },
+    });
+  }
+
+  // Convenience links
   buttons.push({
     type: 2 as const,
     style: 5 as const,
@@ -94,14 +264,9 @@ function linkButtons(symbol: string, prUrl?: string) {
     )}/`,
     emoji: { name: "📈" },
   });
-  buttons.push({
-    type: 2 as const,
-    style: 5 as const,
-    label: "SEC Filings",
-    url: `https://www.sec.gov/edgar/search/#/q=${encodeURIComponent(symbol)}`,
-    emoji: { name: "📄" },
-  });
-  return [{ type: 1 as const, components: buttons }];
+
+  comps.push({ type: 1 as const, components: buttons });
+  return comps;
 }
 
 /* --------------- preconditions --------------- */
@@ -115,12 +280,11 @@ log.info("[BOOT] cadence:", {
   ALERT_THRESHOLD: cfg.ALERT_THRESHOLD,
 });
 const ENABLE_THREADS = (cfg as any).DISCORD_CREATE_THREAD !== false; // default true
-const ADD_REACTIONS = (cfg as any).DISCORD_ADD_REACTIONS !== false; // default true
 const CONCURRENCY = Number(
   process.env.NEON_CONCURRENCY ?? (cfg as any).CONCURRENCY ?? 4
 );
 
-// Alert only if expected move >= this percent (uses max(p50, p90) from llmCheck)
+// Soft threshold for context only; we always alert
 const MOVE_ALERT_THRESHOLD_PCT = 40;
 
 /* ---------------- state ---------------- */
@@ -147,12 +311,11 @@ async function runWithConcurrency<T>(
       active++;
       Promise.resolve(worker(v, i))
         .catch((err) => {
-          // already logged inside worker; keep pool going
           log.error("[WORKER] unhandled error", { idx: i, err });
         })
         .finally(() => {
           active--;
-          launch(); // start next
+          launch();
         });
       if (active < concurrency) launch();
     };
@@ -215,21 +378,41 @@ async function processItem(item: any) {
   eventDb.save(item);
 
   // ---------- LLM enrichment ----------
+  let decision: "YES" | "SPECULATIVE" | "PASS" = "PASS";
+  let reasons: string[] = [];
+  let gates = {
+    isWire: false,
+    hasNamedCounterparty: false,
+    hasQuantDetails: false,
+    hasIndependentCorroboration: false,
+    tickerVerified: false,
+    redFlagsDetected: false,
+  };
+  let impact = null as any;
+
   let estBucket = "n/a";
   let p50 = "n/a";
   let p90 = "n/a";
-  let p50Num = 0; // numeric capture for gating
-  let p90Num = 0; // numeric capture for gating
+  let p50Num = 0;
+  let p90Num = 0;
   let blurb = "";
   let strengthLabel = "";
   let confEmoji = "🟡";
   let conf: "low" | "medium" | "high" = "low";
+  let catalystStrength = 0;
   let capStr = "n/a";
   let pxStr = "n/a";
   let pros: string[] = [];
   let cons: string[] = [];
   let redFlags: string[] = [];
-  let sources: { title: string; url: string }[] = [];
+  let sources:
+    | {
+        title: string;
+        url: string;
+        publisher?: string;
+        publishedISO?: string;
+      }[]
+    | undefined = [];
 
   try {
     const out = await runLlmCheck(item, {
@@ -243,6 +426,11 @@ async function processItem(item: any) {
     });
     log.info(out);
 
+    decision = out.decision?.invest ?? "PASS";
+    reasons = out.decision?.reasons ?? [];
+    gates = out.decision?.gates ?? gates;
+    impact = out.decision?.impact ?? null;
+
     if (out.est) {
       estBucket = out.est.expected_move.bucket;
       p50Num = Number(out.est.expected_move.p50 || 0);
@@ -250,13 +438,15 @@ async function processItem(item: any) {
       p50 = pct(p50Num);
       p90 = pct(p90Num);
       conf = out.est.confidence as any;
+      confEmoji = out.confidenceEmoji || confEmoji;
+      catalystStrength = clamp01(out.est.catalyst_strength || 0);
     }
-    blurb = out.blurb;
-    strengthLabel = out.strengthBucket;
-    confEmoji = out.confidenceEmoji;
+    blurb = out.blurb || blurb;
+    strengthLabel = out.strengthBucket || strengthLabel;
 
     if (out.basics?.marketCapUsd) capStr = humanCapUsd(out.basics.marketCapUsd);
-    if (out.basics?.price != null) pxStr = `$${out.basics.price.toFixed(4)}`;
+    if (out.basics?.price != null)
+      pxStr = `$${Number(out.basics.price).toFixed(4)}`;
 
     pros = out.pros || [];
     cons = out.cons || [];
@@ -266,25 +456,57 @@ async function processItem(item: any) {
     log.warn("[LLM] error", e);
   }
 
-  // ---------- ALERT GATE: require >= threshold move ----------
+  // ---------- Context about threshold (no longer gating alerts) ----------
   const moveMax = Math.max(
     Number.isFinite(p50Num) ? p50Num : 0,
     Number.isFinite(p90Num) ? p90Num : 0
   );
-  if (moveMax < MOVE_ALERT_THRESHOLD_PCT) {
-    log.info("[NEWS] skip (expected move below threshold)", {
-      symbol,
-      p50: p50Num,
-      p90: p90Num,
-      threshold: MOVE_ALERT_THRESHOLD_PCT,
-      bucket: estBucket,
-    });
-    return; // do not send Discord message
-  }
+  const belowThreshold = moveMax < MOVE_ALERT_THRESHOLD_PCT;
+  const thresholdNote = belowThreshold
+    ? `Below alert threshold (${Math.round(
+        moveMax
+      )}% < ${MOVE_ALERT_THRESHOLD_PCT}%).`
+    : "";
 
-  const color = chooseColor(conf);
+  // ---------- Build Discord message (always send) ----------
+  const color = chooseColorByDecision(decision, belowThreshold);
 
-  // ---------- Embeds ----------
+  const decisionIcon =
+    decision === "YES" ? "🟢" : decision === "SPECULATIVE" ? "🟠" : "🟡";
+  const verificationLines = [
+    `${boolEmoji(gates.isWire)} on wire/IR`,
+    `${boolEmoji(gates.hasNamedCounterparty)} named counterparty`,
+    `${boolEmoji(gates.hasQuantDetails)} quantitative details`,
+    `${boolEmoji(gates.hasIndependentCorroboration)} independent corroboration`,
+    `${boolEmoji(gates.tickerVerified)} ticker verified`,
+    `${gates.redFlagsDetected ? "❌ red flags" : "✅ no red flags"}`,
+  ].join("\n");
+
+  const impactLines = impact
+    ? [
+        `Total: ${meter01(impact.total ?? 0)}`,
+        `• Materiality: ${pct((impact.materiality ?? 0) * 100)}`,
+        `• Binding: ${pct((impact.bindingLevel ?? 0) * 100)}`,
+        `• Counterparty: ${pct((impact.counterpartyQuality ?? 0) * 100)}`,
+        `• Specificity: ${pct((impact.specificity ?? 0) * 100)}`,
+        `• Corroboration: ${pct((impact.corroboration ?? 0) * 100)}`,
+        `• ExecRisk: ${pct((impact.executionRisk ?? 0) * 100)}`,
+      ].join("\n")
+    : "• _n/a_";
+
+  const contextLines =
+    decision === "PASS" || belowThreshold
+      ? bullets(
+          [
+            decision === "PASS"
+              ? "Model decision: **PASS** (posted for awareness)"
+              : "",
+            thresholdNote,
+          ].filter(Boolean),
+          3
+        )
+      : undefined;
+
   const mainEmbed = {
     title: `${symbol} — ${canonicalHeadline}`.slice(0, 256),
     url: canonicalLink || undefined,
@@ -293,17 +515,43 @@ async function processItem(item: any) {
     timestamp: publishedAt || nowIso(),
     author: { name: "NEON·PR — Live Catalyst" },
     footer: {
-      text: `class=${String(item.klass)} • score=${item.score.toFixed(
-        2
-      )} • ${strengthLabel}`,
+      text: `class=${String(item.klass)} • score=${Number(
+        item.score ?? 0
+      ).toFixed(2)} • ${strengthLabel}`,
     },
     fields: [
-      { name: "🎯 Expected Move", value: `\`${estBucket}\``, inline: true },
-      { name: "p50 / p90", value: `\`${p50}\` / \`${p90}\``, inline: true },
+      {
+        name: "🧭 Decision",
+        value: `**${decisionIcon} ${decision}**\n${bullets(reasons, 4)}`,
+        inline: false,
+      },
+      {
+        name: "🎯 Expected Move",
+        value: `\`${estBucket}\`\n**p50 ${p50}**  •  **p90 ${p90}**`,
+        inline: true,
+      },
+      {
+        name: "🔥 Catalyst Strength",
+        value: `${meter01(catalystStrength)}`,
+        inline: true,
+      },
       {
         name: "Confidence",
         value: `${confEmoji} ${conf}\n${confidenceMeter(conf)}`,
         inline: true,
+      },
+      contextLines
+        ? { name: "ℹ️ Alert Context", value: contextLines, inline: false }
+        : undefined,
+      {
+        name: "✅ Verification Gates",
+        value: verificationLines,
+        inline: false,
+      },
+      {
+        name: "📊 Impact Scorecard",
+        value: impactLines,
+        inline: false,
       },
       {
         name: "Basics",
@@ -312,17 +560,17 @@ async function processItem(item: any) {
       },
       { name: "Drivers", value: bullets(pros, 6), inline: false },
       { name: "Caveats", value: bullets(cons, 6), inline: false },
-    ],
+    ].filter(Boolean) as any[],
   };
 
-  const riskFields = [];
-  if (redFlags.length)
+  const riskFields: any[] = [];
+  if ((redFlags?.length ?? 0) > 0)
     riskFields.push({
       name: "⚠️ Red Flags",
       value: bullets(redFlags, 6),
       inline: false,
     });
-  if (sources.length)
+  if ((sources?.length ?? 0) > 0)
     riskFields.push({
       name: "Sources",
       value: sourcesLines(sources, 6),
@@ -334,16 +582,22 @@ async function processItem(item: any) {
       ? { title: `Risk & Sources — ${symbol}`, color, fields: riskFields }
       : null;
 
-  const components = linkButtons(symbol, canonicalLink);
+  const components = linkButtonsEnhanced(symbol, canonicalLink, sources);
 
   const wantsThread = ENABLE_THREADS;
   const thread = wantsThread
     ? {
-        name: threadName(symbol, canonicalHeadline),
+        name: threadName(symbol, canonicalHeadline, decision, p90Num),
         autoArchiveMinutes: 1440 as 1440,
       }
     : undefined;
-  const reactions = ADD_REACTIONS ? ["👀", "📈", "💬"] : undefined;
+
+  const reactions =
+    (cfg as any).DISCORD_ADD_REACTIONS !== false
+      ? decision === "PASS"
+        ? ["👀", "🧾"]
+        : ["👀", "✅", "📈", "🧠"]
+      : undefined;
 
   await notifyDiscord({
     content: "",
@@ -370,7 +624,6 @@ async function newsCycle() {
       concurrency: CONCURRENCY,
     });
 
-    // ⬇️ run all items concurrently with a safe cap
     await runWithConcurrency(passed, processItem, CONCURRENCY);
   } catch (err) {
     log.error("newsCycle error:", err);
