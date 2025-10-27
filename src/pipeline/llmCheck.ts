@@ -37,8 +37,8 @@ export type ImpactScoreCard = {
   counterpartyQuality: number; // 0..1
   specificity: number; // 0..1
   corroboration: number; // 0..1
-  executionRisk: number; // 0..1 (higher = lower risk)
-  total: number; // weighted sum (see WEIGHTS)
+  executionRisk: number; // 0..1 (inverted)
+  total: number; // weighted sum
 };
 
 export type Decision = "YES" | "SPECULATIVE" | "PASS";
@@ -84,7 +84,6 @@ const MODEL = "gpt-5" as const;
 const REASONING_EFFORT: "low" | "medium" | "high" = "medium";
 const MAX_OUT_TOKENS = 100_000;
 
-// Recognized wires / IR patterns
 const WIRE_HOSTS = new Set([
   "www.prnewswire.com",
   "www.globenewswire.com",
@@ -106,7 +105,6 @@ const WIRE_TOKENS = [
   "PRISM MediaWire",
 ];
 
-// Domain trust hints
 const DOMAIN_TRUST_HINTS: Array<[RegExp, number]> = [
   [/(\.|^)sec\.gov$/i, 1],
   [/(\.|^)sedar/i, 0.95],
@@ -122,7 +120,7 @@ const DOMAIN_TRUST_HINTS: Array<[RegExp, number]> = [
 ];
 
 /* ============================================================
-   Utility helpers
+   Small utils
    ============================================================ */
 
 function strengthToBucket(s?: number): { name: string; emoji: string } {
@@ -194,7 +192,7 @@ function isWirePR(url?: string, text?: string): boolean {
     if (url) {
       const host = new URL(url).hostname.toLowerCase();
       if (WIRE_HOSTS.has(host)) return true;
-      if (/^(ir|investors|newsroom)\./i.test(host)) return true;
+      if (/^(ir|investors)\./i.test(host)) return true;
     }
   } catch {}
   return WIRE_TOKENS.some((tok) => t.includes(tok.toLowerCase()));
@@ -238,14 +236,15 @@ function domainTrustHint(url: string | undefined): number | null {
   if (!url) return null;
   try {
     const host = new URL(url).hostname.toLowerCase();
-    for (const [rx, score] of DOMAIN_TRUST_HINTS)
+    for (const [rx, score] of DOMAIN_TRUST_HINTS) {
       if (rx.test(host)) return score;
+    }
   } catch {}
   return null;
 }
 
 /* ============================================================
-   OTC calibration (applied only after gates pass)
+   OTC calibration (after gates pass)
    ============================================================ */
 
 const RX_FULLY_FUNDED =
@@ -386,6 +385,25 @@ function calibrateWithOTCHeuristics(
 }
 
 /* ============================================================
+   Low-confidence estimate if gates fail (still show numbers)
+   ============================================================ */
+
+function downgradeEstForFailedGates(est: LlmEstimation): LlmEstimation {
+  const p50 = Math.min(est.expected_move.p50 ?? 10, 10);
+  const p90 = Math.max(p50 + 1, Math.min(est.expected_move.p90 ?? 25, 35));
+  return {
+    ...est,
+    catalyst_strength: Math.min(est.catalyst_strength ?? 0.3, 0.3),
+    confidence: "low",
+    expected_move: { p50, p90, bucket: bucketFromP90(p90) },
+    blurb:
+      est.blurb && est.blurb.length
+        ? est.blurb
+        : "Verification is weak; treat as watch-only. Low-confidence estimate shown.",
+  };
+}
+
+/* ============================================================
    Simple blurb fallback
    ============================================================ */
 
@@ -408,7 +426,7 @@ function makeSimpleBlurb(
 
   const reasons = bits.length
     ? bits.slice(0, 3).join(", ")
-    : "a material catalyst for a small-cap";
+    : "a potential catalyst for a small-cap";
   const capTxt =
     basics.marketCapUsd && basics.marketCapUsd > 0
       ? `${humanCap(basics.marketCapUsd)} cap`
@@ -424,15 +442,15 @@ function makeSimpleBlurb(
     amtM > 0
       ? `The deal size is ~$${amtM.toFixed(
           0
-        )}M${ratioTxt}, which can trigger a sharp re-rating.`
-      : `For OTC names, setups like this can re-rate fast.`;
-  const line3 = `Near-term move could be big (p90 ~${p90Txt}%).`;
+        )}M${ratioTxt}, which can trigger a re-rating.`
+      : `For OTC names, similar setups can move quickly.`;
+  const line3 = `Near-term strong-case ~${p90Txt}%.`;
 
   return [line1, line2, line3].join(" ").slice(0, 300);
 }
 
 /* ============================================================
-   LLM Prompt + JSON Schema (Legitimacy-first, Impact-scored)
+   LLM instructions
    ============================================================ */
 
 function system_background() {
@@ -441,165 +459,176 @@ function system_background() {
     "Act as a strict gatekeeper. PASS anything that is vague or unverified.",
     "Use web_search to verify the company/ticker, locate the press release on a credible wire or official IR page, and find independent corroboration (filings, gov portals, partner/customer newsroom).",
     "",
-    "Classify binding level:",
-    "- 1.00: definitive, priced, paid order, regulatory approval, production start.",
-    "- 0.70: definitive but not yet funded/executed, awarded with named counterparty.",
+    "Binding level rubric:",
+    "- 1.00: definitive & priced, paid order, regulatory approval, production/operations start.",
+    "- 0.70: definitive but not fully executed/funded, or 'awarded to' with named counterparty.",
     "- 0.40: LOI/MOU/pilot/POC; 'selected as' without purchase or defined rollout.",
-    "- 0.15: intention/partnership discussions/marketing fluff.",
+    "- 0.15: intention/marketing fluff.",
     "",
-    "Compute an Impact Scorecard (0..1 each): materiality, bindingLevel, counterpartyQuality, specificity, corroboration, executionRisk (inverse of contingencies).",
+    "Impact Scorecard (0..1 each): materiality (vs mkt cap, recurring), bindingLevel, counterpartyQuality (gov/blue-chip > small), specificity (numbers/duration/sites), corroboration (filings/gov/customer > wires > blogs), executionRisk (inverse of contingencies).",
     "Weighted total: { materiality:0.28, bindingLevel:0.22, counterpartyQuality:0.18, specificity:0.12, corroboration:0.14, executionRisk:0.06 }.",
     "",
-    "Disqualify (gates fail → PASS): not on wire/IR; no named counterparty; no quantitative details; no independent corroboration; red flags (paid promo only, repeated vague PRs, non-binding language only).",
+    "Disqualify (gates fail → PASS):",
+    "- Not on wire or official IR.",
+    "- No named counterparty.",
+    "- No quantitative details.",
+    "- No independent corroboration (beyond wire reprints).",
+    "- Red flags: paid promo only, repeated vague PRs, non-binding language only.",
     "",
-    "Estimate short-term upside (intraday to few days). For micro-caps, transformational PRs can reach 80–300%+. Ensure p90 > p50.",
+    "Estimate short-term upside (intraday to a few days). For micro-caps, transformational PRs can reach 80–300%+. Ensure p90 > p50.",
     "",
-    "STRICT JSON ONLY.",
+    "STRICT JSON OUTPUT with all fields present. Keep language terse, trader-focused; cite sources with publisher+date and trust estimates.",
   ].join("\n");
 }
 
-function response_schema() {
-  // JSON Schema for Responses API structured outputs (strict)
+/* ============================================================
+   JSON Schema for Structured Outputs (strict)
+   ============================================================ */
+
+function buildResponseSchema() {
+  const moveEnum = [
+    "<5%",
+    "5-10%",
+    "10-20%",
+    "20-40%",
+    "40-80%",
+    "80-150%",
+    "150-300%",
+    "300-500%",
+    "500%+",
+  ] as const;
+
   return {
-    name: "neon_llmcheck_v2",
-    strict: true,
-    schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        est: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            label: { type: "string" },
-            catalyst_strength: { type: "number", minimum: 0, maximum: 1 },
-            expected_move: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                p50: { type: "number", minimum: 0, maximum: 1000 },
-                p90: { type: "number", minimum: 0, maximum: 1000 },
-                bucket: {
-                  type: "string",
-                  enum: [
-                    "<5%",
-                    "5-10%",
-                    "10-20%",
-                    "20-40%",
-                    "40-80%",
-                    "80-150%",
-                    "150-300%",
-                    "300-500%",
-                    "500%+",
-                  ],
-                },
-              },
-              required: ["p50", "p90", "bucket"],
-            },
-            confidence: { type: "string", enum: ["low", "medium", "high"] },
-            rationale_short: { type: "string", maxLength: 240 },
-            blurb: { type: "string", maxLength: 300 },
-          },
-          required: [
-            "label",
-            "catalyst_strength",
-            "expected_move",
-            "confidence",
-            "rationale_short",
-            "blurb",
-          ],
-        },
-        pros: { type: "array", items: { type: "string" }, maxItems: 8 },
-        cons: { type: "array", items: { type: "string" }, maxItems: 8 },
-        red_flags: { type: "array", items: { type: "string" }, maxItems: 8 },
-        sources: {
-          type: "array",
-          maxItems: 8,
-          items: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      est: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          label: { type: "string" },
+          catalyst_strength: { type: "number", minimum: 0, maximum: 1 },
+          expected_move: {
             type: "object",
             additionalProperties: false,
             properties: {
-              title: { type: "string", maxLength: 160 },
-              url: { type: "string" },
-              publishedISO: { type: "string" },
-              publisher: { type: "string", maxLength: 80 },
-              trust: { type: "number", minimum: 0, maximum: 1 },
+              p50: { type: "number", minimum: 0, maximum: 1000 },
+              p90: { type: "number", minimum: 0, maximum: 1000 },
+              bucket: { type: "string", enum: [...moveEnum] },
             },
-            required: ["title", "url"],
+            required: ["p50", "p90", "bucket"],
           },
+          confidence: { type: "string", enum: ["low", "medium", "high"] },
+          rationale_short: { type: "string", maxLength: 240 },
+          blurb: { type: "string", maxLength: 300 },
         },
-        basics: {
-          type: "object",
-          additionalProperties: false,
-          properties: { price: { type: ["number", "null"] } },
-          required: ["price"],
-        },
-        decision: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            invest: { type: "string", enum: ["YES", "SPECULATIVE", "PASS"] },
-            reasons: { type: "array", items: { type: "string" }, maxItems: 4 },
-            gates: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                isWire: { type: "boolean" },
-                hasNamedCounterparty: { type: "boolean" },
-                hasQuantDetails: { type: "boolean" },
-                hasIndependentCorroboration: { type: "boolean" },
-                tickerVerified: { type: "boolean" },
-                redFlagsDetected: { type: "boolean" },
-              },
-              required: [
-                "isWire",
-                "hasNamedCounterparty",
-                "hasQuantDetails",
-                "hasIndependentCorroboration",
-                "tickerVerified",
-                "redFlagsDetected",
-              ],
-            },
-            impact: {
-              type: ["object", "null"],
-              additionalProperties: false,
-              properties: {
-                materiality: { type: "number", minimum: 0, maximum: 1 },
-                bindingLevel: { type: "number", minimum: 0, maximum: 1 },
-                counterpartyQuality: { type: "number", minimum: 0, maximum: 1 },
-                specificity: { type: "number", minimum: 0, maximum: 1 },
-                corroboration: { type: "number", minimum: 0, maximum: 1 },
-                executionRisk: { type: "number", minimum: 0, maximum: 1 },
-                total: { type: "number", minimum: 0, maximum: 1 },
-              },
-              required: [
-                "materiality",
-                "bindingLevel",
-                "counterpartyQuality",
-                "specificity",
-                "corroboration",
-                "executionRisk",
-                "total",
-              ],
-            },
-          },
-          required: ["invest", "reasons", "gates", "impact"],
-        },
-        debug: {
+        required: [
+          "label",
+          "catalyst_strength",
+          "expected_move",
+          "confidence",
+          "rationale_short",
+          "blurb",
+        ],
+      },
+      pros: { type: "array", items: { type: "string" } },
+      cons: { type: "array", items: { type: "string" } },
+      red_flags: { type: "array", items: { type: "string" } },
+      sources: {
+        type: "array",
+        items: {
           type: "object",
           additionalProperties: false,
           properties: {
-            search_queries: {
-              type: "array",
-              items: { type: "string" },
-              maxItems: 10,
-            },
+            title: { type: "string" },
+            url: { type: "string" },
+            publishedISO: { type: "string" },
+            publisher: { type: "string" },
+            trust: { type: "number", minimum: 0, maximum: 1 },
           },
+          required: ["title", "url", "publishedISO", "publisher", "trust"],
         },
       },
-      required: ["est", "pros", "cons", "sources", "basics", "decision"],
+      basics: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          price: { type: "number", minimum: 0 },
+        },
+        required: ["price"],
+      },
+      decision: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          invest: { type: "string", enum: ["YES", "SPECULATIVE", "PASS"] },
+          reasons: { type: "array", items: { type: "string" } },
+          gates: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              isWire: { type: "boolean" },
+              hasNamedCounterparty: { type: "boolean" },
+              hasQuantDetails: { type: "boolean" },
+              hasIndependentCorroboration: { type: "boolean" },
+              tickerVerified: { type: "boolean" },
+              redFlagsDetected: { type: "boolean" },
+            },
+            required: [
+              "isWire",
+              "hasNamedCounterparty",
+              "hasQuantDetails",
+              "hasIndependentCorroboration",
+              "tickerVerified",
+              "redFlagsDetected",
+            ],
+          },
+        },
+        required: ["invest", "reasons", "gates"],
+      },
+      impact: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          materiality: { type: "number", minimum: 0, maximum: 1 },
+          bindingLevel: { type: "number", minimum: 0, maximum: 1 },
+          counterpartyQuality: { type: "number", minimum: 0, maximum: 1 },
+          specificity: { type: "number", minimum: 0, maximum: 1 },
+          corroboration: { type: "number", minimum: 0, maximum: 1 },
+          executionRisk: { type: "number", minimum: 0, maximum: 1 },
+          total: { type: "number", minimum: 0, maximum: 1 },
+        },
+        required: [
+          "materiality",
+          "bindingLevel",
+          "counterpartyQuality",
+          "specificity",
+          "corroboration",
+          "executionRisk",
+          "total",
+        ],
+      },
+      debug: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          search_queries: { type: "array", items: { type: "string" } },
+        },
+        required: ["search_queries"],
+      },
     },
-  };
+    required: [
+      "est",
+      "pros",
+      "cons",
+      "red_flags",
+      "sources",
+      "basics",
+      "decision",
+      "impact",
+      "debug",
+    ],
+  } as const;
 }
 
 /* ============================================================
@@ -670,18 +699,21 @@ export async function runLlmCheck(
       baseURL: process.env.OPENAI_BASE_URL || undefined,
     });
 
-    // Built-in web search tool + strict JSON schema output.
-    // The Responses API supports hosted tools like `web_search` and parallel tool calls. :contentReference[oaicite:2]{index=2}
-    // Structured outputs for Responses should be defined under `text.format` (not `response_format`). :contentReference[oaicite:3]{index=3}
     const resp = await client.responses.create({
       model: MODEL,
       tools: [{ type: "web_search" }],
-      tool_choice: "auto",
-      parallel_tool_calls: true,
+      parallel_tool_calls: false,
       reasoning: { effort: REASONING_EFFORT },
       max_output_tokens: MAX_OUT_TOKENS,
       instructions: system_background(),
-      text: { format: { type: "json_schema", ...response_schema() } },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "neon_llmcheck_v2",
+          strict: true,
+          schema: buildResponseSchema(),
+        },
+      },
       input: [
         {
           role: "user",
@@ -723,37 +755,29 @@ export async function runLlmCheck(
     }
   }
 
-  // ---- Fallback (conservative PASS)
+  // ---- Fallback if model failed entirely
   if (!modelRaw) {
-    const gates = {
-      isWire: isWirePR(canonical.url, body),
-      hasNamedCounterparty: hasNamedCounterparty(body),
-      hasQuantDetails: hasQuantDetails(body),
-      hasIndependentCorroboration: false,
-      tickerVerified: Boolean(symbol),
-      redFlagsDetected: false,
-    };
     const fallbackEst: LlmEstimation = {
       label: String(item.klass ?? "OTHER"),
-      catalyst_strength: 0.3,
-      expected_move: { p50: 10, p90: 30, bucket: "20-40%" },
+      catalyst_strength: 0.2,
+      expected_move: { p50: 8, p90: 20, bucket: "20-40%" },
       confidence: "low",
-      rationale_short: "Insufficient verification. Defaulting to PASS.",
-      blurb: "Verification weak; skipping recommendation.",
+      rationale_short: "Model output missing; conservative placeholder.",
+      blurb: "Conservative placeholder; verification status unknown.",
     };
     const details = formatDiscordDetail(symbol || "?", basics, fallbackEst);
     const sb = strengthToBucket(fallbackEst.catalyst_strength);
     return {
       basics,
-      est: null,
-      blurb: "Verification weak; skipping.",
+      est: fallbackEst,
+      blurb: fallbackEst.blurb,
       details,
       strengthBucket: `${sb.emoji} ${sb.name} (${Math.round(
         fallbackEst.catalyst_strength * 100
       )}%)`,
       confidenceEmoji: confidenceEmoji("low"),
       pros: [],
-      cons: ["No independent corroboration found"],
+      cons: ["Model output missing"],
       red_flags: [],
       sources: [
         {
@@ -767,8 +791,23 @@ export async function runLlmCheck(
       decision: {
         invest: "PASS",
         reasons: ["Model parse failure / insufficient data"],
-        gates,
-        impact: null,
+        gates: {
+          isWire: isWirePR(canonical.url, body),
+          hasNamedCounterparty: hasNamedCounterparty(body),
+          hasQuantDetails: hasQuantDetails(body),
+          hasIndependentCorroboration: false,
+          tickerVerified: Boolean(symbol),
+          redFlagsDetected: false,
+        },
+        impact: {
+          materiality: 0.1,
+          bindingLevel: 0.1,
+          counterpartyQuality: 0.1,
+          specificity: 0.1,
+          corroboration: 0.1,
+          executionRisk: 0.1,
+          total: 0.1,
+        },
       },
       debug: { search_queries: [] },
     };
@@ -777,7 +816,7 @@ export async function runLlmCheck(
   // ---- Sanitize model output
   const norm = sanitizeModelJSON(modelRaw);
 
-  // Recompute/augment gates locally to avoid model hallucinations
+  // Recompute/augment gates locally
   const computedGates = {
     isWire: isWirePR(canonical.url, body) || !!norm.decision?.gates?.isWire,
     hasNamedCounterparty:
@@ -791,7 +830,6 @@ export async function runLlmCheck(
     redFlagsDetected: !!norm.decision?.gates?.redFlagsDetected,
   };
 
-  // If gates fail → force PASS
   const gatesPass =
     computedGates.isWire &&
     computedGates.hasNamedCounterparty &&
@@ -800,16 +838,19 @@ export async function runLlmCheck(
     computedGates.tickerVerified &&
     !computedGates.redFlagsDetected;
 
-  // Apply OTC calibration only if gatesPass
-  let est: LlmEstimation | null = gatesPass ? norm.est : null;
-  if (gatesPass && est)
+  // Always keep an estimate, even if gates fail
+  let est: LlmEstimation = norm.est;
+  if (gatesPass) {
     est = calibrateWithOTCHeuristics(item, basics, fullBody, est);
+  } else {
+    est = downgradeEstForFailedGates(est);
+  }
 
-  // Final decision by local rules
+  // Final decision by local rules (unchanged)
   let finalInvest: Decision = "PASS";
-  const cs = est?.catalyst_strength ?? 0;
-  const conf = est?.confidence ?? "low";
-  const p90 = est?.expected_move.p90 ?? 0;
+  const cs = est.catalyst_strength ?? 0;
+  const conf = est.confidence ?? "low";
+  const p90 = est.expected_move.p90 ?? 0;
   const impactTotal = norm.impact?.total ?? 0;
 
   if (gatesPass) {
@@ -823,21 +864,31 @@ export async function runLlmCheck(
     )
       finalInvest = "SPECULATIVE";
     else finalInvest = "PASS";
+  } else {
+    finalInvest = "PASS";
   }
 
-  const blurb =
-    est && norm.est?.blurb && norm.est.blurb.length >= 30
+  // Blurb: plain-language note if gates fail
+  const missingBits: string[] = [];
+  if (!computedGates.hasQuantDetails) missingBits.push("no clear numbers");
+  if (!computedGates.hasIndependentCorroboration)
+    missingBits.push("no independent confirmation");
+  if (!computedGates.isWire) missingBits.push("not on a credible newswire/IR");
+  if (computedGates.redFlagsDetected) missingBits.push("red flags found");
+
+  const blurb = gatesPass
+    ? norm.est?.blurb && norm.est.blurb.length >= 30
       ? norm.est.blurb
-      : est
-      ? makeSimpleBlurb(item, basics, fullBody, est)
-      : "Verification or clarity gates failed; skipping.";
+      : makeSimpleBlurb(item, basics, fullBody, est)
+    : `Low-confidence: ${missingBits.join(
+        ", "
+      )}. Estimates shown for context only.`;
 
   const details = formatDiscordDetail(symbol || "?", basics, est);
-  const sVal = est?.catalyst_strength ?? 0;
+  const sVal = est.catalyst_strength ?? 0;
   const sb = strengthToBucket(sVal);
   const confEmoji = confidenceEmoji(est?.confidence);
 
-  // Price passthrough
   if (norm.price != null && Number.isFinite(Number(norm.price)))
     basics.price = Number(norm.price);
 
@@ -862,10 +913,10 @@ export async function runLlmCheck(
           ? [
               ...(gatesPass
                 ? ["Upside/strength/confidence below thresholds"]
-                : ["One or more verification gates failed"]),
+                : ["Verification is weak (see checks)"]),
             ]
           : [
-              "All verification gates passed",
+              "All verification checks passed",
               `Confidence ${est?.confidence}`,
               `Catalyst strength ${Math.round(
                 (est?.catalyst_strength ?? 0) * 100
@@ -916,7 +967,7 @@ function sanitizeModelJSON(raw: any) {
   let p50 = parsePctAny(em?.p50);
   let p90 = parsePctAny(em?.p90);
   if (!isFinite(p50)) p50 = 0;
-  if (!isFinite(p90)) p90 = p50;
+  if (!isFinite(p90)) p90 = p50 + 1;
   p50 = Math.max(0, Math.min(1000, p50));
   p90 = Math.max(p50 + 1, Math.min(1000, p90));
   const bucket = (() => {
@@ -1043,29 +1094,22 @@ function extractOutputText(resp: any): string {
   if (Array.isArray(resp?.output)) {
     const texts: string[] = [];
     for (const blk of resp.output) {
-      const maybe = (blk as any)?.content;
+      const maybe = blk?.content;
       if (Array.isArray(maybe)) {
         for (const c of maybe) {
-          const t =
-            (c as any)?.text ??
-            (c as any)?.output_text ??
-            (c as any)?.value ??
-            "";
+          const t = c?.text ?? c?.output_text ?? c?.value ?? "";
           if (typeof t === "string" && t.trim()) texts.push(t);
         }
       }
-      const direct = (blk as any)?.text ?? (blk as any)?.output_text;
+      const direct = blk?.text ?? blk?.output_text;
       if (typeof direct === "string" && direct.trim()) texts.push(direct);
     }
     const joined = texts.join("").trim();
     if (joined) return joined;
   }
-  const c0 = (resp as any)?.choices?.[0];
+  const c0 = resp?.choices?.[0];
   const legacy =
-    c0?.message?.content ??
-    c0?.delta?.content ??
-    (resp as any)?.message?.content ??
-    "";
+    c0?.message?.content ?? c0?.delta?.content ?? resp?.message?.content ?? "";
   if (typeof legacy === "string" && legacy.trim()) return legacy.trim();
   const raw = typeof resp === "string" ? resp : JSON.stringify(resp);
   const fence =

@@ -149,7 +149,7 @@ export async function fetchFmpPressReleases(
 
     try {
       const { data: stableData } = await axios.get(stableBase, {
-        params: { page, limit: 25, apikey: cfg.FMP_API_KEY },
+        params: { page, limit: 100, apikey: cfg.FMP_API_KEY },
         timeout: 8000,
       });
       data = stableData;

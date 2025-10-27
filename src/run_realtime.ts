@@ -46,8 +46,8 @@ function sourcesLines(
   srcs?: {
     title: string;
     url: string;
-    publisher?: string;
-    publishedISO?: string;
+    publisher?: string | null;
+    publishedISO?: string | null;
   }[],
   max = 6
 ) {
@@ -58,7 +58,7 @@ function sourcesLines(
       const label = s.title ? s.title.slice(0, 90) : s.url;
       const metaParts = [];
       if (s.publisher) metaParts.push(s.publisher);
-      const d = shortDate(s.publishedISO);
+      const d = shortDate(s.publishedISO ?? undefined);
       if (d) metaParts.push(d);
       const meta = metaParts.length ? ` — _${metaParts.join(" · ")}_` : "";
       return `• [${label}](${s.url})${meta}`;
@@ -150,8 +150,8 @@ function splitSources(
   srcs?: {
     title: string;
     url: string;
-    publisher?: string;
-    publishedISO?: string;
+    publisher?: string | null;
+    publishedISO?: string | null;
   }[]
 ) {
   const out = {
@@ -183,8 +183,8 @@ function linkButtonsEnhanced(
   sources?: {
     title: string;
     url: string;
-    publisher?: string;
-    publishedISO?: string;
+    publisher?: string | null;
+    publishedISO?: string | null;
   }[]
 ) {
   const comps: any[] = [];
@@ -204,7 +204,7 @@ function linkButtonsEnhanced(
       type: 2 as const,
       style: 5 as const,
       label: irOrWire.publisher
-        ? `PR/IR: ${irOrWire.publisher.slice(0, 20)}`
+        ? `PR/IR: ${String(irOrWire.publisher).slice(0, 20)}`
         : "Open PR / IR",
       url: irOrWire.url,
       emoji: { name: "📰" },
@@ -363,19 +363,19 @@ async function processItem(item: any) {
   const publishedAt = item.publishedAt ?? null;
 
   // ---------- DEDUPE ----------
-  const hash = eventDb.makeHash({
-    title: canonicalHeadline,
-    url: canonicalLink,
-    source: item.source,
-  });
-  if (eventDb.seen(hash)) {
-    log.info("[NEWS] dedupe", {
-      symbol,
-      title: canonicalHeadline.slice(0, 120),
-    });
-    return;
-  }
-  eventDb.save(item);
+  // const hash = eventDb.makeHash({
+  //   title: canonicalHeadline,
+  //   url: canonicalLink,
+  //   source: item.source,
+  // });
+  // if (eventDb.seen(hash)) {
+  //   log.info("[NEWS] dedupe", {
+  //     symbol,
+  //     title: canonicalHeadline.slice(0, 120),
+  //   });
+  //   return;
+  // }
+  // eventDb.save(item);
 
   // ---------- LLM enrichment ----------
   let decision: "YES" | "SPECULATIVE" | "PASS" = "PASS";
@@ -409,8 +409,8 @@ async function processItem(item: any) {
     | {
         title: string;
         url: string;
-        publisher?: string;
-        publishedISO?: string;
+        publisher?: string | null;
+        publishedISO?: string | null;
       }[]
     | undefined = [];
 
