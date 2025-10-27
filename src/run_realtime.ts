@@ -363,19 +363,19 @@ async function processItem(item: any) {
   const publishedAt = item.publishedAt ?? null;
 
   // ---------- DEDUPE ----------
-  // const hash = eventDb.makeHash({
-  //   title: canonicalHeadline,
-  //   url: canonicalLink,
-  //   source: item.source,
-  // });
-  // if (eventDb.seen(hash)) {
-  //   log.info("[NEWS] dedupe", {
-  //     symbol,
-  //     title: canonicalHeadline.slice(0, 120),
-  //   });
-  //   return;
-  // }
-  // eventDb.save(item);
+  const hash = eventDb.makeHash({
+    title: canonicalHeadline,
+    url: canonicalLink,
+    source: item.source,
+  });
+  if (eventDb.seen(hash)) {
+    log.info("[NEWS] dedupe", {
+      symbol,
+      title: canonicalHeadline.slice(0, 120),
+    });
+    return;
+  }
+  eventDb.save(item);
 
   // ---------- LLM enrichment ----------
   let decision: "YES" | "SPECULATIVE" | "PASS" = "PASS";
