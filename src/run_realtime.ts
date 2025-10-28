@@ -616,8 +616,6 @@ async function newsCycle() {
   try {
     const fmpPressReleases = await fetchFmpPressReleases({ maxPages: 1 });
     const polygonNews = await fetchPolygonReferenceNews({ maxPages: 1 });
-    console.log("FMP => ", fmpPressReleases);
-    console.log("Polygon => ", polygonNews);
 
     const rawItems = [...fmpPressReleases, ...polygonNews];
     const classified = classify(rawItems);
