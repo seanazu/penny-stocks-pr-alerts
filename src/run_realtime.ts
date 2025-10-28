@@ -11,6 +11,7 @@ import {
   isMarketCapValid,
 } from "./providers/fmp.js";
 import { runLlmCheck } from "./pipeline/llmCheck.js";
+import { fetchPolygonReferenceNews } from "./providers/polygon.js";
 
 const nowIso = () => new Date().toISOString();
 
@@ -613,7 +614,12 @@ async function newsCycle() {
   const started = Date.now();
 
   try {
-    const rawItems = await fetchFmpPressReleases({ maxPages: 1 });
+    const fmpPressReleases = await fetchFmpPressReleases({ maxPages: 1 });
+    const polygonNews = await fetchPolygonReferenceNews({ maxPages: 1 });
+    console.log("FMP => ", fmpPressReleases);
+    console.log("Polygon => ", polygonNews);
+
+    const rawItems = [...fmpPressReleases, ...polygonNews];
     const classified = classify(rawItems);
     const scored = score(classified);
     const passed = scored.filter((it) => it.score >= cfg.ALERT_THRESHOLD);
