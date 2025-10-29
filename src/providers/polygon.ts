@@ -35,7 +35,7 @@ export async function fetchPolygonReferenceNews(
   const base = "https://api.polygon.io/v2/reference/news";
   const defaults: Record<string, string> = {
     order: "desc",
-    limit: "10",
+    limit: "30",
     sort: "published_utc",
   };
 
